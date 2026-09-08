@@ -459,16 +459,21 @@ async function parseQlCmd() {
   if (btn) { btn.disabled = true; btn.textContent = "解析中…"; }
   try {
     const j = await apiPost("/subscriptions/parse-ql", { command: cmd });
-    if (j.code !== 0) return toast(j.msg || "解析失败", false);
-    const d = j.data;
+    if (j.code !== 0) {
+      return toast(j.msg || "解析失败", false);
+    }
+    const d = j.data || {};
+    if (!d.url) {
+      return toast("未能从命令中识别出仓库地址，请检查是否为 ql repo <url> ... 格式", false);
+    }
     if (d.name) $("#sub_name").value = d.name;
     if (d.alias) $("#sub_alias").value = d.alias;
-    if (d.url) $("#sub_url").value = d.url;
-    if (d.branch) $("#sub_branch").value = d.branch;
-    if (d.stype) $("#sub_type").value = d.stype;
-    if (d.whitelist !== undefined) $("#sub_white").value = d.whitelist;
-    if (d.blacklist !== undefined) $("#sub_black").value = d.blacklist;
-    if (d.dependence !== undefined) $("#sub_dep").value = d.dependence;
+    $("#sub_url").value = d.url;
+    $("#sub_branch").value = d.branch || "main";
+    $("#sub_type").value = d.stype || "git";
+    $("#sub_white").value = d.whitelist || "";
+    $("#sub_black").value = d.blacklist || "";
+    $("#sub_dep").value = d.dependence || "";
     toast("已自动识别并填充 ✅");
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = old || "解析并填充"; }

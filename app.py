@@ -1,5 +1,6 @@
 """青豆面板 - 应用入口（绿色可移动，单进程，内存友好）。"""
 import os
+import subprocess
 import sys
 import time
 
@@ -15,9 +16,30 @@ config.ensure_dirs()
 app = Flask(__name__, static_folder=os.path.join(BASE_DIR, "static"), static_url_path="/static")
 
 
+def _cache_version():
+    """取 git commit hash 前 8 位作为静态资源版本号；非 git 目录则用时间戳。"""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=BASE_DIR, stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    return str(int(time.time()))
+
+
 @app.route("/")
 def index():
-    return send_from_directory(os.path.join(BASE_DIR, "static"), "index.html")
+    path = os.path.join(BASE_DIR, "static", "index.html")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+    except Exception:
+        return send_from_directory(os.path.join(BASE_DIR, "static"), "index.html")
+    html = html.replace("{{CACHE_VERSION}}", _cache_version())
+    return html
 
 
 @app.route("/healthz")

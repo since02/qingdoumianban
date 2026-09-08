@@ -40,11 +40,13 @@ def parse_ql_repo(cmd: str):
     rest = toks[idx + 1:]
     if not rest:
         return None
-    url = rest[0]
-    white = rest[1] if len(rest) > 1 else ""
-    black = rest[2] if len(rest) > 2 else ""
-    dependence = rest[3] if len(rest) > 3 else ""
-    branch = rest[4] if len(rest) > 4 else "main"
+    url = rest[0].strip().strip("'\"")
+    if not url:
+        return None
+    white = rest[1].strip().strip("'\"") if len(rest) > 1 else ""
+    black = rest[2].strip().strip("'\"") if len(rest) > 2 else ""
+    dependence = rest[3].strip().strip("'\"") if len(rest) > 3 else ""
+    branch = rest[4].strip().strip("'\"") if len(rest) > 4 else "main"
     name = _repo_name(url)
     return {"stype": "git", "name": name, "alias": name, "url": url,
             "branch": branch or "main", "whitelist": white,
