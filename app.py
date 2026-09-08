@@ -7,6 +7,18 @@ import time
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
+# pythonw 无控制台时 sys.stdout 为 None，任何 print 都会抛异常导致进程静默退出。
+# 这里兜底把标准输出重定向到日志文件，保证无控制台环境下也不会因此崩溃。
+if sys.stdout is None or sys.stderr is None:
+    try:
+        _log_dir = os.path.join(BASE_DIR, "data")
+        os.makedirs(_log_dir, exist_ok=True)
+        _log_f = open(os.path.join(_log_dir, "panel.log"), "a", encoding="utf-8", errors="replace")
+        sys.stdout = _log_f
+        sys.stderr = _log_f
+    except Exception:
+        pass
+
 from flask import Flask, send_from_directory
 from core import db, config
 from core import scheduler as sched_mod

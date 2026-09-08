@@ -13,29 +13,16 @@ if not exist ".venv\Scripts\python.exe" (
   if exist ".venv\Scripts\pip.exe" call .venv\Scripts\pip install -r requirements.txt
 )
 
-REM 选择解释器：优先 venv 的 pythonw（无控制台，关闭本窗口不会杀掉面板进程）
-if exist ".venv\Scripts\pythonw.exe" (
-  set "PY=.venv\Scripts\pythonw.exe"
+REM 选择解释器：优先 venv 的 python（用普通 python.exe；不用 pythonw，避免无控制台时 print 导致进程静默退出）
+if exist ".venv\Scripts\python.exe" (
+  set "PY=.venv\Scripts\python.exe"
 ) else (
-  set "PY=pythonw"
+  set "PY=python"
 )
 
-REM 关键：先停掉旧的面板进程，避免重复点击 start 导致端口被占用、新面板打不开
-powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*app.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
-timeout /t 1 >nul
+echo 正在启动青豆面板（后台运行，日志: data\panel.log）...
+"%PY%" panel_ctl.py start
 
-if not exist "data" mkdir data
-echo 正在启动青豆面板...
-
-REM 端口预检：5700 是否被【非面板】进程占用（被旧面板占用上面已经清理，这里是兜底提示）
-powershell -NoProfile -Command "$p=Get-NetTCPConnection -LocalPort 5700 -ErrorAction SilentlyContinue; if($p){$proc=Get-Process -Id $p.OwningProcess -ErrorAction SilentlyContinue; Add-Content -Path 'data\panel.log' -Value ('[端口预检] 警告：5700 端口已被进程 '+($proc.Name)+'(PID '+$p.OwningProcess+') 占用，若面板启动失败请更换端口或关闭该进程')}" >nul 2>&1
-
-REM 用 cmd /c 包一层，使重定向正确捕获 pythonw 的输出到日志（这是修复面板打不开后无日志可查的关键）
-start "" cmd /c "%PY% app.py > data\panel.log 2>&1"
-
-REM 等几秒后做健康检查，结果写入日志（端口默认 5700）
-powershell -NoProfile -Command "Start-Sleep -Seconds 3; try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:5700/healthz' -TimeoutSec 6 -UseBasicParsing; Add-Content -Path 'data\panel.log' -Value ('[启动检测] HTTP ' + $r.StatusCode + ' 面板已就绪，浏览器访问 http://127.0.0.1:5700') } catch { Add-Content -Path 'data\panel.log' -Value ('[启动检测] 未检测到服务，请打开 data\panel.log 查看上方报错；或确认端口后浏览器访问 http://127.0.0.1:5700') }" >nul 2>&1
-
-REM 启动完成，自动关闭本窗口
+REM 短暂显示结果后自动关闭本窗口
 timeout /t 2 >nul
 exit
