@@ -110,5 +110,5 @@ def run_script(name):
     else:
         cmd = f'python "{rel}"'
     res = __import__("core.executor", fromlist=["executor"]).submit(
-        cmd, task_name=f"脚本:{name}", kind="task")
+        cmd, task_name=f"脚本:{name}", kind="task", lock_key=f"script:{name}")
     return json_ok({"status": res}, msg="已提交执行")

@@ -681,10 +681,14 @@ async function exportBackup() {
 }
 async function exportDb() {
   try {
+    const r = await fetch("/api/system/backup/db", { headers: { "Authorization": "Bearer " + TOKEN } });
+    if (!r.ok) { toast("导出失败（权限不足？）", false); return; }
+    const blob = await r.blob();
     const a = document.createElement("a");
-    a.href = "/api/system/backup/db";
-    a.download = "qingdou.db";
+    a.href = URL.createObjectURL(blob);
+    a.download = "qingdou-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".db";
     a.click();
+    URL.revokeObjectURL(a.href);
     toast("已开始下载数据库文件");
   } catch (e) { toast("导出失败", false); }
 }

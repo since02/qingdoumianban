@@ -16,6 +16,7 @@ from routes import bp, json_ok, json_err, auth_required, get_json_body
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_PATH = os.path.join(BASE_DIR, "app.py")
+SCRIPTS_DIR = os.path.join(BASE_DIR, "data", "scripts")
 
 
 def _sys_info():
@@ -113,13 +114,24 @@ def _spawn_detached():
     """以完全脱离终端的守护方式启动一个新的面板进程（继承当前 cwd 与解释器）。"""
     log_path = os.path.join(BASE_DIR, "data", "daemon.log")
     logf = open(log_path, "a", buffering=1)
+    # 注意：Windows 下一旦重定向了 stdout/stderr，就不能再设置 close_fds=True，
+    # 否则 subprocess 会抛 ValueError: close_fds is not supported on Windows platforms
+    # if you redirect stdin/stdout/stderr。这里统一用 False（Linux 同样允许）。
     kwargs = dict(args=[sys.executable, APP_PATH], cwd=BASE_DIR,
-                  stdout=logf, stderr=logf, close_fds=True)
+                  stdout=logf, stderr=logf, close_fds=False)
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(**kwargs)
+    try:
+        proc = subprocess.Popen(**kwargs)
+    finally:
+        # 父进程关闭自己的日志副本即可，子进程已继承其句柄
+        try:
+            logf.close()
+        except Exception:
+            pass
+    return proc
 
 
 @bp.route("/system/restart", methods=["POST"])
@@ -191,6 +203,23 @@ def backup_export():
             payload["data"][t] = [dict(r) for r in rows]
         except Exception:
             payload["data"][t] = []
+    # 同时备份 data/scripts 下的真实脚本文件内容（此前仅备份了未使用的 scripts 表，存在磁盘上的脚本本身并未导出）
+    try:
+        files = []
+        for root, _d, files_in in os.walk(SCRIPTS_DIR):
+            for fn in files_in:
+                if fn.endswith((".py", ".js", ".sh", ".txt", ".md", ".json")):
+                    fp = os.path.join(root, fn)
+                    try:
+                        with open(fp, "r", encoding="utf-8", errors="replace") as sf:
+                            content = sf.read()
+                        rel = os.path.relpath(fp, SCRIPTS_DIR).replace("\\", "/")
+                        files.append({"path": rel, "content": content})
+                    except Exception:
+                        pass
+        payload["files"] = files
+    except Exception:
+        payload["files"] = []
     body = _json.dumps(payload, ensure_ascii=False, indent=2)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return Response(body, mimetype="application/json",
@@ -246,7 +275,25 @@ def backup_restore():
         scheduler.reload_all()
     except Exception:
         pass
-    return json_ok(msg="已从备份恢复（已替换设置/任务/订阅/变量/通知/AI/依赖/脚本配置）")
+    # 恢复磁盘上的脚本文件（按相对路径写回 data/scripts，防止越权写其它目录）
+    files = data.get("files")
+    if isinstance(files, list):
+        for fobj in files:
+            if not isinstance(fobj, dict):
+                continue
+            rel = (fobj.get("path") or "").strip().replace("\\", "/")
+            if not rel or ".." in rel.split("/"):
+                continue
+            dest = os.path.normpath(os.path.join(SCRIPTS_DIR, rel))
+            if not dest.startswith(os.path.normpath(SCRIPTS_DIR)):
+                continue
+            try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "w", encoding="utf-8") as wf:
+                    wf.write(fobj.get("content", ""))
+            except Exception:
+                pass
+    return json_ok(msg="已从备份恢复（已替换设置/任务/订阅/变量/通知/AI/依赖/脚本配置及脚本文件）")
 
 
 # ============ GitHub 自动更新 ============
@@ -269,11 +316,11 @@ def _git_update_core():
         return False, "当前不是 git 仓库，无法自动更新。请先 git clone 你的仓库到本目录。"
     repo = config.get_setting("github_repo", "") or ""
     branch = config.get_setting("github_branch", "main") or "main"
-    _git("stash", "-u")
+    # 使用 --autostash：有本地改动时自动暂存、拉取后自动还原；拉取失败也不会丢失改动。
     if repo:
-        rc, out, err = _git("pull", repo, branch, timeout=180)
+        rc, out, err = _git("pull", "--autostash", repo, branch, timeout=180)
     else:
-        rc, out, err = _git("pull", timeout=180)
+        rc, out, err = _git("pull", "--autostash", timeout=180)
     if rc != 0:
         return False, "更新失败: " + (err or out)[:300]
     return True, "已更新"

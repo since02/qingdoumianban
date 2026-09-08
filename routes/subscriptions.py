@@ -1,6 +1,7 @@
 """青豆面板 - 订阅管理路由。"""
 from flask import request
 from core import db, scheduler
+from core.cron import is_valid_cron
 from core.subscription import sync_subscription, run_sub_now
 from routes import bp, json_ok, json_err, auth_required, get_json_body
 
@@ -20,6 +21,9 @@ def create_sub():
     url = (b.get("url") or "").strip()
     if not name or not url:
         return json_err("名称与地址不能为空")
+    schedule = (b.get("schedule") or "0 0 * * *").strip()
+    if not is_valid_cron(schedule):
+        return json_err("cron 表达式无效")
     sid = db.execute(
         "INSERT INTO subscriptions(name,url,branch,stype,schedule,status,alias) "
         "VALUES(?,?,?,?,?,?,?)",

@@ -2,6 +2,7 @@
 import os
 import sys
 import time
+import uuid
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from core import db, config
@@ -199,10 +200,21 @@ def _run_and_log(command, task_id=None, task_name=None, sub_id=None,
 
 
 def submit(command, task_id=None, task_name=None, sub_id=None,
-           notify=0, notify_type=None, timeout=None, kind="task"):
-    """提交一次执行（异步），立即返回。"""
-    key = f"t{task_id}" if task_id else (f"s{sub_id}" if sub_id else "once")
-    if _run_locks.get(key):
+           notify=0, notify_type=None, timeout=None, kind="task", lock_key=None):
+    """提交一次执行（异步），立即返回。
+
+    lock_key 用于去重防重叠：
+      - 显式传入时直接使用（例如脚本运行可用脚本路径，避免同一脚本并发重叠）；
+      - 未传入时按 task/sub id 推断；都没有则为每次调用生成唯一 key（互不阻塞）。
+    """
+    if lock_key is None:
+        if task_id:
+            lock_key = f"t{task_id}"
+        elif sub_id:
+            lock_key = f"s{sub_id}"
+        else:
+            lock_key = "once_" + uuid.uuid4().hex
+    if _run_locks.get(lock_key):
         # 已有同任务在跑，跳过本次（避免重叠）
         return "skipped"
     _run_locks[key] = True
