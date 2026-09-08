@@ -219,6 +219,7 @@ function renderNav() {
 function navigate(view) {
   CURRENT = view;
   if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
+  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
   if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
   if (filesTimer) { clearInterval(filesTimer); filesTimer = null; }
   $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
@@ -874,8 +875,16 @@ function waitUntilDead(cb) {
 /* ---------- 微信对接（yyb-go，独立页面） ---------- */
 async function renderYybgo() {
   if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
-  $("#main").innerHTML = `<div class="page-head"><div><h2>微信对接 (yyb-go)</h2><div class="sub">对接应用宝/微信扫码登录服务，展示连接状态与已登录账号</div></div>
-    <div class="toolbar"><button class="ghost" onclick="loadYybgo()">刷新</button></div></div>
+  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
+  $("#main").innerHTML = `<div class="page-head"><div><h2>微信对接 (yyb-go)</h2><div class="sub">一键启动本机 yyb-go 服务，扫码添加微信账号并管理</div></div>
+    <div class="toolbar"><button class="ghost" onclick="loadYybgo()">刷新</button>
+    <button class="primary" onclick="yybAddAccount()">＋ 扫码添加微信账号</button></div></div>
+    <div class="card" style="margin-bottom:16px;"><div class="page-head"><h2 style="font-size:15px;">服务管理</h2>
+      <div class="toolbar" id="yyb-svc-btns"></div></div>
+      <div id="yyb-svc" class="muted">检测中…</div>
+      <div class="row2" style="margin-top:10px;"><div><label>yyb-go 程序路径（exe 完整路径，用于本机一键启动）</label><input id="yyb_bin" placeholder="例如 D:\\tools\\yyb-go\\yyb-go.exe"></div>
+      <div><label>启动参数（可选，如监听地址/端口）</label><input id="yyb_args" placeholder="例如 -addr 127.0.0.1:8899"></div></div>
+    </div>
     <div class="grid" style="grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
       <div class="card"><div class="page-head"><h2 style="font-size:15px;">连接状态</h2></div>
         <div id="yyb-conn" class="muted">检测中…</div>
@@ -886,7 +895,8 @@ async function renderYybgo() {
         <div><label>端口（默认 8000，可自定义）</label><input id="yyb_port" value="8000"></div></div>
         <label>yyb-go API Token（YYB_API_TOKEN，留空则不修改）</label><input id="yyb_token" placeholder="留空表示不修改">
         <div class="toolbar"><button class="primary" onclick="saveYybConfig()">保存配置</button>
-        <button onclick="testYyb()">测试连接</button></div>
+        <button onclick="testYyb()">测试连接</button>
+        <a id="yyb_console" class="ghost" style="text-decoration:none;display:none;padding:7px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px;" target="_blank" href="#">打开 yyb-go 控制台 ↗</a></div>
         <p class="muted" id="yyb_msg" style="font-size:12px;">启用后，登录页将出现「微信扫码登录」按钮。</p>
       </div>
     </div>
@@ -895,7 +905,84 @@ async function renderYybgo() {
       <div id="yyb-accounts" class="muted">加载中…</div>
     </div>`;
   loadYybgo();
-  yybTimer = setInterval(() => { if (CURRENT === "yybgo") loadYybConn(); }, 8000);
+  loadYybService();
+  yybTimer = setInterval(() => { if (CURRENT === "yybgo") { loadYybConn(); loadYybService(); } }, 8000);
+}
+async function loadYybService() {
+  const j = await apiGet("/yybgo/service").catch(() => null);
+  const box = $("#yyb-svc"), btns = $("#yyb-svc-btns"), cons = $("#yyb_console");
+  if (!box) return;
+  if (!j || j.code !== 0) { box.innerHTML = `<span class="badge b-red">状态获取失败</span>`; return; }
+  const d = j.data;
+  $("#yyb_bin").value = d.bin || "";
+  $("#yyb_args").value = d.args || "";
+  if (cons) { cons.href = d.console_url || "#"; cons.style.display = d.running ? "inline-block" : "none"; }
+  let st;
+  if (!d.bin) st = `<span class="badge b-gray">未配置程序路径</span> <span class="muted">在下方填写 yyb-go.exe 路径后可一键启动</span>`;
+  else if (!d.exists) st = `<span class="badge b-red">程序不存在</span> <span class="mono">${esc(d.bin)}</span>`;
+  else if (d.health_ok) st = `<span class="dot green"></span><b>运行中</b> · 端口 ${esc(d.port)} · <a href="${esc(d.console_url)}" target="_blank">${esc(d.console_url)}</a>${d.pid ? " · PID " + d.pid : ""}`;
+  else if (d.listening) st = `<span class="dot green"></span><b>端口已监听</b>（health 未响应）· 端口 ${esc(d.port)}`;
+  else if (d.running) st = `<span class="dot yellow"></span><b>进程在运行</b>但端口 ${esc(d.port)} 未监听（可能启动参数与端口配置不一致）`;
+  else st = `<span class="dot gray"></span><b>已停止</b>`;
+  box.innerHTML = st;
+  if (btns) {
+    const canStart = d.bin && d.exists;
+    btns.innerHTML = `
+      <button class="primary sm" ${canStart && !d.running ? "" : "disabled"} onclick="yybSvcStart()">▶ 启动服务</button>
+      <button class="sm" ${d.running ? "" : "disabled"} onclick="yybSvcStop()">⏹ 停止服务</button>`;
+  }
+}
+async function yybSvcStart() {
+  if (!$("#yyb_bin") || !confirmSaveYybBin()) return;
+  toast("正在启动 yyb-go…");
+  const j = await apiPost("/yybgo/service/start", {}).catch(() => ({ code: 1, msg: "请求失败" }));
+  toast(j.msg || (j.code === 0 ? "已启动" : "启动失败"), j.code === 0);
+  loadYybService(); loadYybConn();
+}
+async function yybSvcStop() {
+  const j = await apiPost("/yybgo/service/stop", {}).catch(() => ({ code: 1, msg: "请求失败" }));
+  toast(j.msg || (j.code === 0 ? "已停止" : "停止失败"), j.code === 0);
+  loadYybService(); loadYybConn();
+}
+function confirmSaveYybBin() {
+  const bin = $("#yyb_bin").value.trim();
+  if (!bin) { toast("请先填写 yyb-go 程序路径", false); return false; }
+  return true;
+}
+let yybQrTimer = null;
+async function yybAddAccount() {
+  openModal("扫码添加微信账号", `<div style="text-align:center;">
+      <div id="yyb-qr-status" class="muted" style="margin-bottom:10px;">正在生成二维码…</div>
+      <div id="yyb-qr-img" style="min-height:220px;display:flex;align-items:center;justify-content:center;"></div>
+      <p class="muted" style="font-size:12px;margin-top:10px;">请使用微信扫码并在手机上确认授权；成功后账号会出现在下方列表。</p>
+    </div>`,
+    `<button class="ghost" onclick="closeModal()">关闭</button>`);
+  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
+  const j = await apiPost("/yybgo/qr", {}).catch(() => ({ code: 1, msg: "请求失败" }));
+  if (j.code !== 0) { $("#yyb-qr-status").textContent = "❌ " + (j.msg || "生成失败（请确认 yyb-go 已启动且已配置 Token）"); return; }
+  $("#yyb-qr-img").innerHTML = `<img src="${j.data.image}" style="width:220px;height:220px;border-radius:8px;" alt="二维码">`;
+  $("#yyb-qr-status").textContent = "等待扫码…";
+  const sid = j.data.session_id;
+  let done = false;
+  yybQrTimer = setInterval(async () => {
+    if (done || CURRENT !== "yybgo") { clearInterval(yybQrTimer); yybQrTimer = null; return; }
+    const p = await apiGet(`/yybgo/qr/${sid}/poll`).catch(() => null);
+    if (!p || p.code !== 0) return;
+    if (p.data.ready) {
+      done = true; clearInterval(yybQrTimer); yybQrTimer = null;
+      $("#yyb-qr-status").innerHTML = `<span class="badge b-green">扫码成功</span> 正在确认…`;
+      const c = await apiPost(`/yybgo/qr/${sid}/confirm`, {}).catch(() => ({ code: 1 }));
+      $("#yyb-qr-status").innerHTML = c.code === 0
+        ? `<span class="badge b-green">添加成功 ✅</span> <span class="muted">可关闭本窗口</span>`
+        : `<span class="badge b-yellow">已扫码</span> ${esc(c.msg || "确认接口未就绪，稍后刷新列表查看")}`;
+      loadYybConn();
+    } else if (p.data.expired) {
+      done = true; clearInterval(yybQrTimer); yybQrTimer = null;
+      $("#yyb-qr-status").innerHTML = `<span class="badge b-red">二维码已过期</span> <button class="sm" onclick="yybAddAccount()">重新生成</button>`;
+    } else if (p.data.status) {
+      $("#yyb-qr-status").textContent = "状态: " + p.data.status;
+    }
+  }, 2500);
 }
 async function loadYybgo() {
   const c = await apiGet("/yybgo/config").catch(() => ({ code: 1 }));
@@ -903,6 +990,8 @@ async function loadYybgo() {
     $("#yyb_enabled").checked = !!c.data.enabled;
     $("#yyb_host").value = c.data.host || "127.0.0.1";
     $("#yyb_port").value = c.data.port || "8000";
+    if ($("#yyb_bin")) $("#yyb_bin").value = c.data.bin || "";
+    if ($("#yyb_args")) $("#yyb_args").value = c.data.args || "";
   }
   loadYybConn();
 }
@@ -935,9 +1024,11 @@ async function saveYybConfig() {
     host: $("#yyb_host").value.trim() || "127.0.0.1",
     port: $("#yyb_port").value.trim() || "8000",
     token: $("#yyb_token").value,
+    bin: $("#yyb_bin") ? $("#yyb_bin").value.trim() : "",
+    args: $("#yyb_args") ? $("#yyb_args").value.trim() : "",
   }).catch(() => ({ code: 1, msg: "保存失败" }));
   toast(j.code === 0 ? "yyb-go 配置已保存" : (j.msg || "保存失败"), j.code === 0);
-  if (j.code === 0) { $("#yyb_token").value = ""; loadYybgo(); }
+  if (j.code === 0) { $("#yyb_token").value = ""; loadYybgo(); loadYybService(); }
 }
 async function testYyb() {
   const j = await apiGet("/yybgo/health").catch(() => ({ code: 1, msg: "测试失败" }));
@@ -951,6 +1042,7 @@ async function testYyb() {
 /* ---------- 京东 Cookie（通过 yyb-go 微信登录态获取） ---------- */
 async function renderJdCookie() {
   if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
+  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
   if (window.jdTimer) { clearInterval(window.jdTimer); window.jdTimer = null; }
   $("#main").innerHTML = `<div class="page-head"><div><h2>京东 Cookie</h2><div class="sub">复用已登录的微信账号（yyb-go）自动获取京东 pt_key/pt_pin，写入环境变量供青龙脚本使用</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderJdCookie()">刷新</button></div></div>

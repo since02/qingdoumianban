@@ -10,11 +10,18 @@
 本模块同时提供「连接状态 + 已登录微信账号」查询，供独立「微信对接」页面展示。
 注意：登录相关接口为公开接口（login 阶段使用）；配置/连接/账号查询接口需鉴权。
 """
+import os
+import re
+import time
+import subprocess
+
 import requests
 from flask import request, Blueprint
 from core import db, config
 from routes import json_ok, json_err, auth_required, get_json_body
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HIDDEN_VBS = os.path.join(BASE_DIR, "run_hidden.vbs")
 yyb_bp = Blueprint("yybgo", __name__, url_prefix="/api")
 
 YYB_TERMINAL = {"expired", "cancelled", "unknown", "timeout"}
@@ -34,6 +41,155 @@ def _yyb_cfg():
         "url": f"http://{host}:{port}",
         "token": token,
     }
+
+
+# ============ yyb-go 服务管理（本机程序启动/停止/状态） ============
+
+def _yyb_bin():
+    return (config.get_setting("yybgo_bin", "") or "").strip()
+
+
+def _yyb_args():
+    return (config.get_setting("yybgo_args", "") or "").strip()
+
+
+def _port_listening(port, timeout=1.0):
+    import socket
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        return s.connect_ex(("127.0.0.1", int(port))) == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _yyb_procs(bin_path=None):
+    """按可执行文件路径或进程名找出 yyb-go 进程。"""
+    try:
+        import psutil
+    except Exception:
+        return []
+    name_hint = os.path.splitext(os.path.basename(bin_path))[0].lower() if bin_path else "yyb-go"
+    out = []
+    for p in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+        try:
+            exe = (p.info.get("exe") or "")
+            name = (p.info.get("name") or "").lower()
+            if bin_path and os.path.normcase(exe) == os.path.normcase(bin_path):
+                out.append(p)
+            elif not bin_path and name.startswith(name_hint):
+                out.append(p)
+        except Exception:
+            continue
+    return out
+
+
+def _hidden_start(cmdline, workdir):
+    """通过 run_hidden.vbs 以隐藏窗口、不等待方式启动命令（进程独立于本面板）。"""
+    subprocess.run(
+        ["wscript.exe", "//nologo", HIDDEN_VBS, cmdline, workdir],
+        cwd=BASE_DIR, timeout=30,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+@yyb_bp.route("/yybgo/service", methods=["GET"])
+@auth_required
+def yyb_service_status():
+    cfg = _yyb_cfg()
+    bin_path = _yyb_bin()
+    exists = bool(bin_path) and os.path.isfile(bin_path)
+    procs = _yyb_procs(bin_path if exists else None)
+    listening = _port_listening(cfg["port"])
+    health_ok = False
+    if listening:
+        r, err = _yyb_call("GET", "/health", timeout=4)
+        health_ok = (r is not None and r.status_code == 200)
+    running = bool(procs) or listening
+    return json_ok({
+        "bin": bin_path,
+        "exists": exists,
+        "running": running,
+        "pid": procs[0].pid if procs else None,
+        "port": cfg["port"],
+        "listening": listening,
+        "health_ok": health_ok,
+        "console_url": cfg["url"],
+        "args": _yyb_args(),
+    })
+
+
+@yyb_bp.route("/yybgo/service/start", methods=["POST"])
+@auth_required
+def yyb_service_start():
+    bin_path = _yyb_bin()
+    if not bin_path:
+        return json_err("请先在下方填写 yyb-go 程序路径（yyb-go.exe 的完整路径）")
+    if not os.path.isfile(bin_path):
+        return json_err(f"程序不存在: {bin_path}")
+    cfg = _yyb_cfg()
+    if _port_listening(cfg["port"]):
+        return json_err(f"端口 {cfg['port']} 已有服务在监听（可能已启动）")
+    workdir = os.path.dirname(bin_path) or "."
+    # 日志写到 data/yybgo.log：借助外部隐藏启动器无法直接重定向，改由脚本自身输出兜底；
+    # 这里用隐藏启动器的参数形式拼命令行，输出重定向交给 yyb-go 自身（若无输出则静默）。
+    extra = _yyb_args()
+    cmdline = f'"{bin_path}"' + (f" {extra}" if extra else "")
+    try:
+        _hidden_start(cmdline, workdir)
+    except Exception as e:
+        return json_err(f"启动失败: {e}")
+    # 等待端口就绪（最多 12s）
+    ok = False
+    for _ in range(12):
+        time.sleep(1)
+        if _port_listening(cfg["port"]):
+            ok = True
+            break
+    if ok:
+        return json_ok(msg=f"yyb-go 已启动: {cfg['url']}")
+    return json_err("已发出启动命令，但端口未就绪。请确认程序路径/参数是否正确（可到 yyb-go 目录查看其日志）")
+
+
+@yyb_bp.route("/yybgo/service/stop", methods=["POST"])
+@auth_required
+def yyb_service_stop():
+    cfg = _yyb_cfg()
+    procs = _yyb_procs(_yyb_bin() or None)
+    stopped = []
+    for p in procs:
+        try:
+            p.terminate()
+            stopped.append(p.pid)
+        except Exception:
+            continue
+    time.sleep(1.2)
+    for p in _yyb_procs(_yyb_bin() or None):
+        try:
+            p.kill()
+        except Exception:
+            pass
+    # 端口兜底：若仍监听，按占用者结束
+    if _port_listening(cfg["port"]):
+        try:
+            out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=20).stdout
+            for line in out.splitlines():
+                if f":{cfg['port']}" in line and "LISTENING" in line.upper():
+                    parts = line.split()
+                    if len(parts) >= 5 and parts[-1].isdigit():
+                        subprocess.run(["taskkill", "/F", "/PID", parts[-1]],
+                                       capture_output=True, timeout=20)
+        except Exception:
+            pass
+    time.sleep(0.5)
+    if _port_listening(cfg["port"]):
+        return json_err("端口仍被占用，请手动结束对应进程")
+    return json_ok(msg=f"yyb-go 已停止（结束进程 {len(stopped) or 0} 个）")
 
 
 def _yyb_call(method, path, **kw):
@@ -83,6 +239,8 @@ def get_yyb_config():
         "host": cfg["host"],
         "port": cfg["port"],
         "has_token": bool(cfg["token"]),
+        "bin": _yyb_bin(),
+        "args": _yyb_args(),
     })
 
 
@@ -99,6 +257,10 @@ def save_yyb_config():
     config.set_setting("yybgo_port", port)
     if token:
         config.set_setting("yybgo_token", token)
+    if "bin" in b:
+        config.set_setting("yybgo_bin", (b.get("bin") or "").strip())
+    if "args" in b:
+        config.set_setting("yybgo_args", (b.get("args") or "").strip())
     return json_ok(msg="已保存 yyb-go 配置")
 
 
