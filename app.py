@@ -72,25 +72,27 @@ def bootstrap():
     sched_mod.reload_all()
 
 
-def _serve_with_retry(app, port, max_retries=20, retry_interval=0.5):
-    """启动 HTTP 服务；若端口暂被占用（如重启交接期）则重试，直到成功或耗尽次数。
-    监听地址取自设置 host（默认 0.0.0.0，可改 127.0.0.1 仅本机）。"""
+def _serve_with_retry(app, port, max_retries=30, retry_interval=1.0):
+    """启动 HTTP 服务；若端口暂被占用（如重启交接期、或他进程占用）则重试。
+    监听地址取自设置 host（默认 0.0.0.0，可改 127.0.0.1 仅本机）。
+    端口持续不可用会打印明确错误并退出，便于排查。"""
     host = config.get_setting("host", "0.0.0.0") or "0.0.0.0"
+    last_err = None
     for attempt in range(max_retries):
         try:
-            try:
-                from waitress import serve
-                serve(app, host=host, port=port, threads=8, ident="Qingdou")
-                return
-            except Exception:
-                app.run(host=host, port=port, threaded=True, use_reloader=False)
-                return
+            from waitress import serve
+            print(f"青豆面板正在监听: http://{host}:{port}")
+            serve(app, host=host, port=port, threads=8, ident="Qingdou")
+            return
         except OSError as e:
-            if attempt < max_retries - 1:
-                print(f"[青豆面板] 端口 {port} 暂不可用（{e}），{retry_interval}s 后重试（{attempt+1}/{max_retries}）…")
-                time.sleep(retry_interval)
-            else:
-                raise
+            last_err = e
+            print(f"[青豆面板] 端口 {port} 暂不可用: {e}（{attempt+1}/{max_retries}），{retry_interval}s 后重试…")
+            time.sleep(retry_interval)
+    # 重试耗尽，明确失败原因
+    print(f"[青豆面板] 端口 {port} 持续不可用，面板启动失败。请检查："
+          f"1) 是否有其他程序占用该端口（如另一个面板实例）；"
+          f"2) 系统设置里的端口/host 是否正确。错误详情: {last_err}")
+    raise last_err
 
 
 if __name__ == "__main__":
