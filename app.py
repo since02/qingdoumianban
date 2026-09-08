@@ -7,17 +7,64 @@ import time
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-# pythonw 无控制台时 sys.stdout 为 None，任何 print 都会抛异常导致进程静默退出。
-# 这里兜底把标准输出重定向到日志文件，保证无控制台环境下也不会因此崩溃。
-if sys.stdout is None or sys.stderr is None:
+# 启动期就把 stdout/stderr 双写到 data/panel.log：
+# 1) pythonw 无控制台时 sys.stdout 为 None，任何 print 都会抛异常导致进程静默退出（必须兜底）
+# 2) 后台启动场景下，没有日志就无法排查"打不开"这类问题
+class _Tee:
+    """同时写原流与日志文件；任一失败都不影响另一个。"""
+
+    def __init__(self, stream, f):
+        self._s = stream
+        self._f = f
+
+    def write(self, data):
+        for t in (self._s, self._f):
+            if t is None:
+                continue
+            try:
+                t.write(data)
+                t.flush()
+            except Exception:
+                pass
+        return len(data or "")
+
+    def flush(self):
+        for t in (self._s, self._f):
+            if t is None:
+                continue
+            try:
+                t.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        try:
+            return self._s.fileno()
+        except Exception:
+            raise OSError("no fileno")
+
+
+def _setup_log():
     try:
         _log_dir = os.path.join(BASE_DIR, "data")
         os.makedirs(_log_dir, exist_ok=True)
-        _log_f = open(os.path.join(_log_dir, "panel.log"), "a", encoding="utf-8", errors="replace")
-        sys.stdout = _log_f
-        sys.stderr = _log_f
+        f = open(os.path.join(_log_dir, "panel.log"), "a", encoding="utf-8", errors="replace")
+        f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 进程启动 =====\n")
+        f.flush()
+        if sys.stdout is None or sys.stderr is None:
+            sys.stdout = f if sys.stdout is None else sys.stdout
+            sys.stderr = f if sys.stderr is None else sys.stderr
+        else:
+            sys.stdout = _Tee(sys.stdout, f)
+            sys.stderr = _Tee(sys.stderr, f)
     except Exception:
         pass
+
+
+_setup_log()
 
 from flask import Flask, send_from_directory
 from core import db, config

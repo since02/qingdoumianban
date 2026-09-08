@@ -150,33 +150,32 @@ def start():
     log = open(LOG_FILE, "a", encoding="utf-8", errors="replace")
     log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动面板 =====\n")
     log.flush()
-
-    py = sys.executable
-    kwargs = {}
-    if os.name == "nt":
-        # 无控制台分离 + 独立进程组，关闭调用方窗口不会杀掉面板
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        )
-        kwargs["close_fds"] = False
-    else:
-        kwargs["start_new_session"] = True
+    log.close()
 
     try:
-        proc = subprocess.Popen(
-            [py, "app.py"],
-            cwd=BASE_DIR,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            **kwargs,
-        )
-        print(f"已启动面板进程 PID={proc.pid}（日志: data{os.sep}panel.log）")
+        if os.name == "nt":
+            # Windows：交由 panel_hidden.vbs 以「隐藏窗口 + 不等待」方式拉起，
+            # 这样进程不属于本控制台，关闭 bat 窗口也不会把面板一起杀掉
+            # （此前 DETACHED_PROCESS 方式在部分环境下仍会随调用方退出而终止）。
+            vbs = os.path.join(BASE_DIR, "panel_hidden.vbs")
+            if os.path.exists(vbs):
+                subprocess.run(["wscript.exe", "//nologo", vbs],
+                               cwd=BASE_DIR, timeout=30,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print("已通过隐藏方式启动面板（日志: data\\panel.log）")
+            else:  # vbs 缺失时退回直接启动
+                raise FileNotFoundError(vbs)
+        else:
+            py = sys.executable
+            flog = open(LOG_FILE, "a", encoding="utf-8", errors="replace")
+            subprocess.Popen([py, "app.py"], cwd=BASE_DIR,
+                             stdout=flog, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+            print(f"已后台启动面板（日志: data{os.sep}panel.log）")
     except Exception as e:
         print(f"启动失败: {e}")
-        log.write(f"[启动失败] {e}\n")
-        log.close()
+        with open(LOG_FILE, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"[启动失败] {e}\n")
         return 1
 
     # 健康检查
@@ -196,12 +195,23 @@ def start():
     if ok:
         msg = f"面板已就绪: http://127.0.0.1:{port}"
         print(msg)
-        log.write(f"[启动检测] {msg}\n")
     else:
         msg = "启动后未检测到服务，请查看 data/panel.log 中的报错"
         print(msg)
-        log.write(f"[启动检测] {msg}\n")
-    log.close()
+        # 把日志尾部直接打出来，便于一眼看到崩溃原因
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                tail = f.readlines()[-25:]
+            if tail:
+                print("---- data/panel.log 尾部 ----")
+                for ln in tail:
+                    print("  " + ln.rstrip())
+                print("-----------------------------")
+        except Exception:
+            pass
+
+    with open(LOG_FILE, "a", encoding="utf-8", errors="replace") as f:
+        f.write(f"[启动检测] {msg}\n")
     return 0 if ok else 1
 
 
