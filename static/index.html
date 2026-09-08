@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>青豆面板</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- 主题切换（登录页角落） -->
+<button class="ghost sm" id="theme-toggle-login" style="position:fixed;top:14px;right:14px;z-index:101;" onclick="toggleTheme()">🌓 主题</button>
+
+<!-- 登录 -->
+<div id="login">
+  <div class="card box">
+    <div class="logo-big"></div>
+    <h2 style="text-align:center;margin:0 0 4px;">青豆面板</h2>
+    <p class="muted" style="text-align:center;margin:0 0 18px;">本地任务调度 · 轻量 · 可移植</p>
+    <label>用户名</label>
+    <input id="login-user" value="admin" autocomplete="username">
+    <label>密码</label>
+    <input id="login-pass" type="password" autocomplete="current-password" placeholder="默认 adminadmin">
+    <button class="primary" style="width:100%;margin-top:16px;" onclick="doLogin()">登 录</button>
+    <button class="ghost" id="btn-wx" style="width:100%;margin-top:10px;display:none;" onclick="showWxLogin()">🟢 微信扫码登录</button>
+    <p class="muted" style="text-align:center;font-size:12px;margin-top:12px;">默认账号 admin / adminadmin，首次使用请修改密码</p>
+  </div>
+</div>
+
+<!-- 主应用 -->
+<div id="app" class="hidden">
+  <div id="sidebar">
+    <div id="brand"><span class="logo"></span> 青豆面板</div>
+    <div id="nav"></div>
+    <div id="userbox">
+      <div>当前用户：<b id="uname">admin</b></div>
+      <div class="flex" style="margin-top:8px;">
+        <button class="ghost sm" onclick="showChangePw()">改密</button>
+        <button class="ghost sm" onclick="toggleTheme()">🌓 主题</button>
+        <button class="ghost sm" onclick="logout()">退出</button>
+      </div>
+    </div>
+  </div>
+  <div id="main"></div>
+</div>
+
+<!-- 模态层 -->
+<div id="overlay">
+  <div class="modal" id="modal">
+    <div class="modal-head"><span id="modal-title">标题</span><span class="x" onclick="closeModal()">×</span></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
