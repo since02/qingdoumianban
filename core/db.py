@@ -98,6 +98,20 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    pw_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
+    status INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
 """
 
 _local = threading.local()
@@ -137,6 +151,26 @@ def _migrate(conn):
             conn.execute("ALTER TABLE dependencies ADD COLUMN log_file TEXT")
         except Exception:
             pass
+    # 订阅表补齐 ql repo 解析字段
+    cur = conn.execute("PRAGMA table_info(subscriptions)")
+    scols = {r[1] for r in cur.fetchall()}
+    for col in ("whitelist", "blacklist", "dependence"):
+        if col not in scols:
+            try:
+                conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
+    # 多用户：users / sessions 表已在 SCHEMA 内（IF NOT EXISTS 自动创建），此处仅做首次种子账号
+    try:
+        cnt = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        if cnt == 0:
+            from core.config import hash_password, DEFAULT_USERNAME, DEFAULT_PASSWORD
+            conn.execute(
+                "INSERT INTO users(username,pw_hash,role,status) VALUES(?,?,?,?)",
+                (DEFAULT_USERNAME, hash_password(DEFAULT_PASSWORD), "admin", 1),
+            )
+    except Exception:
+        pass
 
 
 def query(sql, args=()):

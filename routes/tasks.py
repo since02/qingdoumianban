@@ -29,6 +29,12 @@ def list_tasks():
     return json_ok(out)
 
 
+@bp.route("/tasks/active", methods=["GET"])
+@auth_required
+def tasks_active():
+    return json_ok(executor.get_active())
+
+
 @bp.route("/tasks/<int:tid>", methods=["GET"])
 @auth_required
 def get_task(tid):
@@ -115,6 +121,7 @@ def run_task(tid):
     res = executor.submit(
         task["command"], task_id=tid, task_name=task["name"],
         notify=task["notify"], notify_type=task["notify_type"], kind="task",
+        lock_key=f"task:{tid}",
     )
     return json_ok({"status": res}, msg="已提交执行")
 
@@ -135,6 +142,19 @@ def run_once():
 def list_logs():
     limit = int(request.args.get("limit", 50))
     rows = db.query("SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,))
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["size"] = os.path.getsize(r["log_file"]) if r["log_file"] and os.path.exists(r["log_file"]) else 0
+        out.append(d)
+    return json_ok(out)
+
+
+@bp.route("/tasks/<int:tid>/logs", methods=["GET"])
+@auth_required
+def task_logs(tid):
+    limit = int(request.args.get("limit", 30))
+    rows = db.query("SELECT * FROM logs WHERE task_id=? ORDER BY id DESC LIMIT ?", (tid, limit))
     out = []
     for r in rows:
         d = dict(r)

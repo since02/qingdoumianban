@@ -1,0 +1,24 @@
+{
+  "name": "青豆面板 Qingdou Panel",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "forwardPorts": [5700],
+  "portsAttributes": {
+    "5700": {
+      "label": "青豆面板 Web",
+      "onAutoForward": "openPreview"
+    }
+  },
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "4gb",
+    "storage": "16gb"
+  },
+  "postCreateCommand": "python3 -m pip install --upgrade pip && python3 -m pip install -r requirements.txt",
+  "postStartCommand": "bash -c 'nohup bash start.sh > /tmp/qingdou.log 2>&1 &'",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  },
+  "remoteUser": "vscode"
+}

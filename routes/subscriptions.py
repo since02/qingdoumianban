@@ -2,6 +2,7 @@
 from flask import request
 from core import db, scheduler
 from core.cron import is_valid_cron
+from core.qlparse import parse_ql_repo
 from core.subscription import sync_subscription, run_sub_now
 from routes import bp, json_ok, json_err, auth_required, get_json_body
 
@@ -25,10 +26,11 @@ def create_sub():
     if not is_valid_cron(schedule):
         return json_err("cron 表达式无效")
     sid = db.execute(
-        "INSERT INTO subscriptions(name,url,branch,stype,schedule,status,alias) "
-        "VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO subscriptions(name,url,branch,stype,schedule,status,alias,whitelist,blacklist,dependence) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
         (name, url, b.get("branch", "main"), b.get("stype", "git"),
-         b.get("schedule", "0 0 * * *"), int(b.get("status", 1)), b.get("alias")),
+         b.get("schedule", "0 0 * * *"), int(b.get("status", 1)), b.get("alias"),
+         b.get("whitelist", ""), b.get("blacklist", ""), b.get("dependence", "")),
     )
     sub = db.query_one("SELECT * FROM subscriptions WHERE id=?", (sid,))
     scheduler.add_sub_job(sub)
@@ -43,15 +45,30 @@ def update_sub(sid):
     if not sub:
         return json_err("订阅不存在")
     db.execute(
-        "UPDATE subscriptions SET name=?,url=?,branch=?,stype=?,schedule=?,status=?,alias=? WHERE id=?",
+        "UPDATE subscriptions SET name=?,url=?,branch=?,stype=?,schedule=?,status=?,alias=?,whitelist=?,blacklist=?,dependence=? WHERE id=?",
         (b.get("name", sub["name"]), b.get("url", sub["url"]),
          b.get("branch", sub["branch"]), b.get("stype", sub["stype"]),
          b.get("schedule", sub["schedule"]), int(b.get("status", sub["status"])),
-         b.get("alias", sub["alias"]), sid),
+         b.get("alias", sub["alias"]),
+         b.get("whitelist", sub.get("whitelist", "")),
+         b.get("blacklist", sub.get("blacklist", "")),
+         b.get("dependence", sub.get("dependence", "")), sid),
     )
     sub = db.query_one("SELECT * FROM subscriptions WHERE id=?", (sid,))
     scheduler.add_sub_job(sub)
     return json_ok(msg="更新成功")
+
+
+@bp.route("/subscriptions/parse-ql", methods=["POST"])
+@auth_required
+def parse_ql():
+    """解析青龙 ql repo / ql raw 命令，返回可直接填充订阅表单的字段。"""
+    b = get_json_body()
+    info = parse_ql_repo(b.get("command") or "")
+    if not info:
+        return json_err("无法识别该命令，请确认是 ql repo/raw 格式，例如："
+                        "ql repo <url> <白名单> <黑名单> <依赖过滤> <分支>")
+    return json_ok(info)
 
 
 @bp.route("/subscriptions/<int:sid>", methods=["DELETE"])

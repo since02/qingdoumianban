@@ -16,6 +16,26 @@ LOGS_DIR = os.path.join(DATA_DIR, "logs")
 CRON_RE = re.compile(r"(?:#|//)\s*cron\s*[:=]\s*([0-9*/,\-\s]{9,})", re.IGNORECASE)
 
 
+def _split_patterns(s):
+    """把 `a|b|c` 形式的竖线分隔模式编译为正则列表（无效模式按字面兜底）。"""
+    if not s:
+        return []
+    out = []
+    for p in s.split("|"):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            out.append(re.compile(p))
+        except re.error:
+            out.append(re.compile(re.escape(p)))
+    return out
+
+
+def _match_any(rel, regexes):
+    return any(rx.search(rel) for rx in regexes)
+
+
 def sync_subscription(sub_id):
     sub = db.query_one("SELECT * FROM subscriptions WHERE id=?", (sub_id,))
     if not sub:
@@ -102,11 +122,24 @@ def _cmd_for_ext(fpath, ext):
 
 
 def _import_crons(target, sub):
+    white = _split_patterns(sub.get("whitelist"))
+    black = _split_patterns(sub.get("blacklist"))
+    dep = _split_patterns(sub.get("dependence"))
     for root, _dirs, files in os.walk(target):
         for fn in files:
             if not fn.endswith((".py", ".js", ".sh")):
                 continue
             fpath = os.path.join(root, fn)
+            rel = os.path.relpath(fpath, target)
+            # 依赖文件（如 sendNotify.js / package.json 等）不导入为任务
+            if _match_any(rel, dep):
+                continue
+            # 黑名单优先跳过
+            if _match_any(rel, black):
+                continue
+            # 白名单存在时，仅导入命中者
+            if white and not _match_any(rel, white):
+                continue
             try:
                 with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                     head = "".join(f.readlines()[:25])
@@ -116,7 +149,6 @@ def _import_crons(target, sub):
             if not m:
                 continue
             schedule = m.group(1).strip()
-            rel = os.path.relpath(fpath, target)
             name = os.path.splitext(fn)[0]
             ext = os.path.splitext(fn)[1]
             _find_or_create_task(sub["id"], f"{sub['alias'] or sub['id']}/{rel}",

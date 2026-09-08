@@ -81,6 +81,53 @@ def system_info():
     return json_ok(_sys_info())
 
 
+# 系统监控：网络 IO 增量需要保留上一次采样
+_net_prev = None
+_net_prev_ts = 0
+
+
+@bp.route("/system/metrics", methods=["GET"])
+@auth_required
+def system_metrics():
+    import time as _t
+    data = {"cpu": None, "cpu_per_core": [], "mem": None, "disk": None, "net": None, "boot": None}
+    try:
+        import psutil
+        data["cpu"] = psutil.cpu_percent(interval=0.3)
+        data["cpu_per_core"] = psutil.cpu_percent(interval=0.1, percpu=True)
+        vm = psutil.virtual_memory()
+        data["mem"] = {"percent": vm.percent, "used_mb": round(vm.used / 1024 / 1024),
+                       "total_mb": round(vm.total / 1024 / 1024)}
+        # 取 data 目录所在磁盘分区
+        disk_path = BASE_DIR
+        try:
+            du = psutil.disk_usage(disk_path)
+            data["disk"] = {"percent": du.percent, "used_gb": round(du.used / 1024**3, 2),
+                            "total_gb": round(du.total / 1024**3, 2), "path": disk_path}
+        except Exception:
+            pass
+        now = _t.time()
+        cur = psutil.net_io_counters()
+        global _net_prev, _net_prev_ts
+        if _net_prev and (now - _net_prev_ts) > 0:
+            dt = now - _net_prev_ts
+            data["net"] = {
+                "sent_kb_s": round((cur.bytes_sent - _net_prev.bytes_sent) / 1024 / dt, 2),
+                "recv_kb_s": round((cur.bytes_recv - _net_prev.bytes_recv) / 1024 / dt, 2),
+            }
+        else:
+            data["net"] = {"sent_kb_s": 0, "recv_kb_s": 0}
+        _net_prev = cur
+        _net_prev_ts = now
+        try:
+            data["boot"] = int(_t.time() - psutil.boot_time())
+        except Exception:
+            pass
+    except Exception as e:
+        data["error"] = str(e)
+    return json_ok(data)
+
+
 @bp.route("/system/settings", methods=["GET"])
 @auth_required
 def get_settings():

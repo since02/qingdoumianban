@@ -1,10 +1,11 @@
-"""青豆面板 - 脚本执行引擎（支持 py/js/命令，限并发，流式写盘，内存友好）。"""
+"""青豆面板 - 脚本执行引擎（支持 py/js/命令，限并发队列，流式写盘，内存友好）。"""
 import os
 import sys
 import time
 import uuid
+import queue
+import threading
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
 from core import db, config
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,16 +13,13 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 SCRIPTS_DIR = os.path.join(DATA_DIR, "scripts")
 LOGS_DIR = os.path.join(DATA_DIR, "logs")
 
-_executor = None
-_run_locks = {}  # task_id/sub_id -> bool，防止同一任务重叠执行
-
-
-def get_executor():
-    global _executor
-    if _executor is None:
-        maxc = int(config.get_setting("max_concurrent", "5") or 5)
-        _executor = ThreadPoolExecutor(max_workers=maxc, thread_name_prefix="qd-task")
-    return _executor
+# 并发队列：工作线程池从队列取任务；超额任务进入队列等待，不再被丢弃。
+_queue = queue.Queue()
+_active = {}            # run_id -> {task_id, task_name, sub_id, kind, started_at, started_iso}
+_queue_lock = {}        # lock_key -> True（运行中或排队中的去重标记）
+_lock = threading.Lock()
+_workers = []
+_workers_n = 0
 
 
 def get_python_path():
@@ -43,14 +41,11 @@ def _resolve_script_ref(token):
     token = (token or "").strip().strip('"').strip("'")
     if not token:
         return token
-    # 绝对路径
     if os.path.isabs(token) and os.path.exists(token):
         return token
-    # 相对面板根目录（data/subs/...、data/scripts/...）
     rel_base = os.path.normpath(os.path.join(BASE_DIR, token))
     if os.path.exists(rel_base):
         return rel_base
-    # 相对脚本目录
     rel_scr = os.path.normpath(os.path.join(SCRIPTS_DIR, token))
     if os.path.exists(rel_scr):
         return rel_scr
@@ -58,10 +53,9 @@ def _resolve_script_ref(token):
 
 
 def _quote_if_needed(p):
-    """仅当路径含空格且尚末加引号时才加引号，避免重复包裹。"""
     p = (p or "").strip()
     if len(p) >= 2 and ((p[0] == '"' and p[-1] == '"') or (p[0] == "'" and p[-1] == "'")):
-        return p  # 已经是带引号的合法形式
+        return p
     if " " in p or (os.name == "nt" and ("(" in p or ")" in p)):
         return f'"{p}"'
     return p
@@ -199,13 +193,53 @@ def _run_and_log(command, task_id=None, task_name=None, sub_id=None,
     return status
 
 
+def _worker():
+    """工作线程：循环从队列取任务执行，直到收到哨兵 None。"""
+    while True:
+        item = _queue.get()
+        if item is None:
+            _queue.task_done()
+            break
+        run_id, fn, lock_key = item
+        try:
+            _active[run_id] = {
+                "run_id": run_id,
+                "task_id": fn._qd_task_id,
+                "task_name": fn._qd_task_name,
+                "sub_id": fn._qd_sub_id,
+                "kind": fn._qd_kind,
+                "started_at": time.time(),
+                "started_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            fn()
+        except Exception:
+            pass
+        finally:
+            _active.pop(run_id, None)
+            if lock_key:
+                _queue_lock.pop(lock_key, None)
+            try:
+                _queue.task_done()
+            except Exception:
+                pass
+
+
+def _ensure_workers(n):
+    global _workers_n
+    with _lock:
+        while _workers_n < n:
+            t = threading.Thread(target=_worker, daemon=True, name=f"qd-worker-{_workers_n}")
+            t.start()
+            _workers.append(t)
+            _workers_n += 1
+
+
 def submit(command, task_id=None, task_name=None, sub_id=None,
            notify=0, notify_type=None, timeout=None, kind="task", lock_key=None):
-    """提交一次执行（异步），立即返回。
+    """提交一次执行（异步，立即返回 queued / skipped）。
 
-    lock_key 用于去重防重叠：
-      - 显式传入时直接使用（例如脚本运行可用脚本路径，避免同一脚本并发重叠）；
-      - 未传入时按 task/sub id 推断；都没有则为每次调用生成唯一 key（互不阻塞）。
+    - 若显式传入 lock_key 且当前已有同 key 任务在运行或排队，则跳过（skipped），避免重叠。
+    - 否则进入并发队列；超过 max_concurrent 的任务排队等待，不再被丢弃。
     """
     if lock_key is None:
         if task_id:
@@ -213,20 +247,46 @@ def submit(command, task_id=None, task_name=None, sub_id=None,
         elif sub_id:
             lock_key = f"s{sub_id}"
         else:
-            lock_key = "once_" + uuid.uuid4().hex
-    if _run_locks.get(lock_key):
-        # 已有同任务在跑，跳过本次（避免重叠）
-        return "skipped"
-    _run_locks[key] = True
-    try:
-        fut = get_executor().submit(
-            _run_and_log, command, task_id, task_name, sub_id, notify, notify_type, timeout, kind
-        )
-        fut.add_done_callback(lambda f: _run_locks.pop(key, None))
-        return "queued"
-    except Exception:
-        _run_locks.pop(key, None)
-        raise
+            lock_key = None
+
+    if lock_key:
+        with _lock:
+            if _queue_lock.get(lock_key):
+                return "skipped"
+            _queue_lock[lock_key] = True
+
+    maxc = int(config.get_setting("max_concurrent", "5") or 5)
+    _ensure_workers(max(1, maxc))
+
+    def _job():
+        return _run_and_log(command, task_id, task_name, sub_id, notify, notify_type, timeout, kind)
+    _job._qd_task_id = task_id
+    _job._qd_task_name = task_name
+    _job._qd_sub_id = sub_id
+    _job._qd_kind = kind
+
+    run_id = uuid.uuid4().hex
+    _queue.put((run_id, _job, lock_key))
+    return "queued"
+
+
+def get_active():
+    """返回运行中/排队中的任务状态，供前端展示。"""
+    maxc = int(config.get_setting("max_concurrent", "5") or 5)
+    running = [v for v in _active.values()]
+    # 排队中的任务 id（尚未被工作线程取出执行的）
+    queued_ids = []
+    for item in list(_queue.queue):
+        if item and item[1] is not None:
+            tid = item[1]._qd_task_id
+            if tid is not None:
+                queued_ids.append(tid)
+    return {
+        "running": running,
+        "queued": _queue.qsize(),
+        "queued_task_ids": queued_ids,
+        "max_concurrent": maxc,
+    }
 
 
 def run_now(command, timeout=None):

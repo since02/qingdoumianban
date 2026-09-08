@@ -1,9 +1,18 @@
 /* 青豆面板 - 前端 SPA（原生 JS，无构建依赖） */
 const API_BASE = "";
 let TOKEN = localStorage.getItem("qd_token") || "";
+let ROLE = localStorage.getItem("qd_role") || "";
 let CURRENT = "dashboard";
 let wxTimer = null;
 let yybTimer = null;
+let metricsTimer = null;
+let filesTimer = null;
+
+/* 权限：viewer(0) < op(1) < admin(2) */
+function roleLevel(r) { return { viewer: 0, op: 1, admin: 2 }[r] || -1; }
+function canOp() { return roleLevel(ROLE) >= 1; }
+function canAdmin() { return roleLevel(ROLE) >= 2; }
+function roleText(r) { return { admin: "管理员", op: "操作员", viewer: "只读" }[r] || r; }
 
 /* 主题（黑/白皮肤）初始化：尽早应用，避免闪烁，且不依赖 $ 助手（避免 TDZ 错误） */
 (function () {
@@ -22,7 +31,10 @@ const NAV = [
   { id: "envs", icon: "🔐", label: "环境变量" },
   { id: "notifs", icon: "🔔", label: "通知设置" },
   { id: "ai", icon: "🤖", label: "AI 对接" },
+  { id: "files", icon: "🗂️", label: "文件管理" },
+  { id: "monitor", icon: "📈", label: "系统监控" },
   { id: "yybgo", icon: "💬", label: "微信对接" },
+  { id: "users", icon: "👥", label: "用户管理", adminOnly: true },
   { id: "system", icon: "⚙️", label: "系统设置" },
 ];
 
@@ -113,12 +125,18 @@ async function doLogin() {
     const j = await r.json();
     if (j.code === 0) {
       TOKEN = j.data.token;
+      ROLE = j.data.role || "admin";
       localStorage.setItem("qd_token", TOKEN);
+      localStorage.setItem("qd_role", ROLE);
       bootApp();
     } else toast(j.msg || "登录失败", false);
   } catch (e) { toast("登录请求失败", false); }
 }
-function logout() { TOKEN = ""; localStorage.removeItem("qd_token"); showLogin(); }
+function logout() {
+  apiPost("/logout", {}).catch(() => {});
+  TOKEN = ""; ROLE = ""; localStorage.removeItem("qd_token"); localStorage.removeItem("qd_role");
+  showLogin();
+}
 async function showChangePw() {
   openModal("修改密码", `
     <label>原密码</label><input id="pw_old" type="password">
@@ -192,18 +210,22 @@ async function confirmWx(sid) {
 
 /* ---------- 导航 ---------- */
 function renderNav() {
-  $("#nav").innerHTML = NAV.map(n =>
+  const items = NAV.filter(n => !n.adminOnly || canAdmin());
+  $("#nav").innerHTML = items.map(n =>
     `<a data-view="${n.id}" class="${n.id === CURRENT ? "active" : ""}"><span class="ico">${n.icon}</span>${n.label}</a>`).join("");
   $$("#nav a").forEach(a => a.onclick = () => navigate(a.dataset.view));
 }
 function navigate(view) {
   CURRENT = view;
   if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
+  if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+  if (filesTimer) { clearInterval(filesTimer); filesTimer = null; }
   $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
   const map = {
     dashboard: renderDashboard, tasks: renderTasks, scripts: renderScripts,
     subs: renderSubs, deps: renderDeps, envs: renderEnvs, notifs: renderNotifs,
-    ai: renderAI, yybgo: renderYybgo, system: renderSystem,
+    ai: renderAI, files: renderFiles, monitor: renderMonitor, users: renderUsers,
+    yybgo: renderYybgo, system: renderSystem,
   };
   (map[view] || renderDashboard)();
 }
@@ -252,27 +274,38 @@ function stat(n, l) { return `<div class="stat"><div class="num">${n}</div><div 
 async function renderTasks() {
   $("#main").innerHTML = `<div class="page-head"><div><h2>定时任务</h2><div class="sub">支持 cron 定时执行 py / js / sh / 命令</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderTasks()">刷新</button>
-    <button class="primary" onclick="taskForm()">+ 新建任务</button>
-    <button class="ghost" onclick="runOnceForm()">▶ 立即运行</button></div></div>
+    ${canOp() ? `<button class="primary" onclick="taskForm()">+ 新建任务</button>
+    <button class="ghost" onclick="runOnceForm()">▶ 立即运行</button>` : ""}</div></div>
     <div id="task-list">加载中…</div>`;
   const j = await apiGet("/tasks");
   if (j.code !== 0) return;
   const rows = j.data;
+  // 运行中/排队状态
+  let activeMap = {};
+  try {
+    const a = await apiGet("/tasks/active");
+    if (a.code === 0) {
+      (a.data.running || []).forEach(r => { if (r.task_id) activeMap[r.task_id] = "running"; });
+      (a.data.queued_task_ids || []).forEach(tid => { if (!activeMap[tid]) activeMap[tid] = "queued"; });
+    }
+  } catch (e) {}
   if (!rows.length) { $("#task-list").innerHTML = `<div class="card empty">还没有任务，点击「新建任务」开始</div>`; return; }
+  const op = canOp();
   $("#task-list").innerHTML = `<div class="card" style="padding:0;"><table><thead><tr>
     <th>名称</th><th>命令</th><th>计划(cron)</th><th>状态</th><th>上次结果</th><th>下次运行</th><th>操作</th></tr></thead><tbody>
     ${rows.map(t => `<tr>
-      <td><b>${esc(t.name)}</b></td>
+      <td><b>${esc(t.name)}</b>${activeMap[t.id] === "running" ? ' <span class="badge b-blue">运行中</span>' : activeMap[t.id] === "queued" ? ' <span class="badge b-yellow">排队中</span>' : ''}</td>
       <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(t.command)}">${esc(t.command)}</td>
       <td class="mono">${esc(t.schedule)}</td>
       <td>${t.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
       <td>${statusBadge(t.last_status)}</td>
       <td class="muted nowrap">${esc(t.next_run || "")}</td>
       <td class="nowrap">
-        <button class="sm" onclick="runTask(${t.id})">运行</button>
+        <button class="sm" onclick="viewTaskLogs(${t.id}, '${esc(t.name)}')">日志</button>
+        ${op ? `<button class="sm" onclick="runTask(${t.id})">运行</button>
         <button class="sm" onclick="toggleTask(${t.id}, ${t.status == 1 ? 0 : 1})">${t.status == 1 ? "停用" : "启用"}</button>
         <button class="sm" onclick="taskForm(${t.id})">编辑</button>
-        <button class="sm danger" onclick="delTask(${t.id})">删</button>
+        <button class="sm danger" onclick="delTask(${t.id})">删</button>` : ""}
       </td></tr>`).join("")}
   </tbody></table></div>`;
 }
@@ -319,11 +352,28 @@ async function submitRunOnce() {
   if (j.code === 0) { toast("已提交执行"); closeModal(); } else toast(j.msg, false);
 }
 
+/* ---------- 任务日志 ---------- */
+async function viewTaskLogs(tid, name) {
+  const j = await apiGet("/tasks/" + tid + "/logs"); if (j.code !== 0) return;
+  const logs = j.data;
+  const body = logs.length ? `<table><thead><tr><th>ID</th><th>状态</th><th>耗时</th><th>开始时间</th><th></th></tr></thead><tbody>
+    ${logs.map(l => `<tr><td>#${l.id}</td><td>${statusBadge(l.status)}</td><td>${l.duration != null ? l.duration + "s" : "-"}</td>
+      <td class="muted nowrap">${esc(l.started_at || "")}</td>
+      <td><button class="sm" onclick="viewLog(${l.id})">查看</button></td></tr>`).join("")}
+  </tbody></table>` : `<div class="empty">该任务暂无执行日志</div>`;
+  openModal("日志 · " + (name || ("#" + tid)), body, `<button class="primary" onclick="closeModal()">关闭</button>`, true);
+}
+async function viewLog(lid) {
+  const j = await apiGet("/logs/" + lid); if (j.code !== 0) return;
+  openModal("日志 #" + lid + " · " + (j.data.log.status || ""), `<div class="logview">${esc(j.data.content || "")}</div>`,
+    `<button class="primary" onclick="closeModal()">关闭</button>`, true);
+}
+
 /* ---------- 脚本管理 ---------- */
 async function renderScripts() {
   $("#main").innerHTML = `<div class="page-head"><div><h2>脚本管理</h2><div class="sub">位于 data/scripts 目录，可直接创建 / 编辑 / 运行</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderScripts()">刷新</button>
-    <button class="primary" onclick="scriptForm()">+ 新建脚本</button></div></div>
+    ${canOp() ? `<button class="primary" onclick="scriptForm()">+ 新建脚本</button>` : ""}</div></div>
     <div id="script-list">加载中…</div>`;
   const j = await apiGet("/scripts");
   if (j.code !== 0) return;
@@ -333,9 +383,9 @@ async function renderScripts() {
     <th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>
     ${rows.map(f => `<tr><td class="mono">${esc(f.name)}</td><td class="muted">${fmtSize(f.size)}</td>
       <td class="muted nowrap">${new Date(f.mtime * 1000).toLocaleString()}</td>
-      <td class="nowrap"><button class="sm" onclick="scriptForm('${encodeURIComponent(f.name)}')">编辑</button>
+      <td class="nowrap">${canOp() ? `<button class="sm" onclick="scriptForm('${encodeURIComponent(f.name)}')">编辑</button>
       <button class="sm" onclick="runScript('${encodeURIComponent(f.name)}')">运行</button>
-      <button class="sm danger" onclick="delScript('${encodeURIComponent(f.name)}')">删</button></td></tr>`).join("")}
+      <button class="sm danger" onclick="delScript('${encodeURIComponent(f.name)}')">删</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div>`;
 }
 function fmtSize(b) { if (b < 1024) return b + " B"; if (b < 1048576) return (b / 1024).toFixed(1) + " KB"; return (b / 1048576).toFixed(1) + " MB"; }
@@ -360,7 +410,7 @@ async function runScript(name) { const j = await apiPost("/scripts/" + decodeURI
 async function renderSubs() {
   $("#main").innerHTML = `<div class="page-head"><div><h2>订阅管理</h2><div class="sub">支持 Git 仓库 / 青龙格式 JSON 清单，自动导入脚本与定时任务</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderSubs()">刷新</button>
-    <button class="primary" onclick="subForm()">+ 新建订阅</button></div></div>
+    ${canOp() ? `<button class="primary" onclick="subForm()">+ 新建订阅</button>` : ""}</div></div>
     <div id="sub-list">加载中…</div>`;
   const j = await apiGet("/subscriptions"); if (j.code !== 0) return;
   const rows = j.data;
@@ -372,9 +422,9 @@ async function renderSubs() {
       <td>${esc(s.branch)}</td><td class="mono">${esc(s.schedule)}</td>
       <td>${s.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
       <td class="muted nowrap">${esc(s.last_sync || "-")} ${s.last_status ? statusBadge(s.last_status) : ""}</td>
-      <td class="nowrap"><button class="sm" onclick="syncSub(${s.id})">同步</button>
+      <td class="nowrap">${canOp() ? `<button class="sm" onclick="syncSub(${s.id})">同步</button>
       <button class="sm" onclick="subForm(${s.id})">编辑</button>
-      <button class="sm danger" onclick="delSub(${s.id})">删</button></td></tr>`).join("")}
+      <button class="sm danger" onclick="delSub(${s.id})">删</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div>`;
 }
 function subForm(id) {
@@ -446,7 +496,7 @@ async function renderDeps() {
         <div><label>pip 可执行（可选）</label><input id="d_pip" placeholder="默认 pip"></div>
         <div><label>npm 可执行（可选）</label><input id="d_npm" placeholder="默认 npm"></div>
       </div>
-      <div style="margin-top:12px;"><button class="primary" onclick="installDep()">安装</button></div>
+      <div style="margin-top:12px;">${canOp() ? `<button class="primary" onclick="installDep()">安装</button>` : `<span class="muted">只读角色无安装权限</span>`}</div>
     </div>
     <div id="dep-list">加载中…</div>`;
   const j = await apiGet("/dependencies"); if (j.code !== 0) return;
@@ -473,15 +523,15 @@ async function viewDepLog(id) {
 async function renderEnvs() {
   $("#main").innerHTML = `<div class="page-head"><div><h2>环境变量</h2><div class="sub">所有启用变量会在任务执行时注入环境</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderEnvs()">刷新</button>
-    <button class="primary" onclick="envForm()">+ 新建变量</button></div></div>
+    ${canOp() ? `<button class="primary" onclick="envForm()">+ 新建变量</button>` : ""}</div></div>
     <div id="env-list">加载中…</div>`;
   const j = await apiGet("/environments"); if (j.code !== 0) return;
   const rows = j.data;
   $("#env-list").innerHTML = rows.length ? `<div class="card" style="padding:0;"><table><thead><tr>
     <th>名称</th><th>值</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>
     ${rows.map(e => `<tr><td class="mono"><b>${esc(e.name)}</b></td><td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.value)}">${esc(e.value)}</td>
-      <td class="muted">${esc(e.remarks || "")}</td><td>${e.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
-      <td class="nowrap"><button class="sm" onclick="envForm(${e.id})">编辑</button><button class="sm danger" onclick="delEnv(${e.id})">删</button></td></tr>`).join("")}
+      <td class="muted">${esc(e.remarks || "")}</td>      <td>${e.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
+      <td class="nowrap">${canOp() ? `<button class="sm" onclick="envForm(${e.id})">编辑</button><button class="sm danger" onclick="delEnv(${e.id})">删</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div>` : `<div class="card empty">暂无变量</div>`;
 }
 function envForm(id) {
@@ -512,7 +562,7 @@ const NOTIF_FIELDS = {
 async function renderNotifs() {
   $("#main").innerHTML = `<div class="page-head"><div><h2>通知设置</h2><div class="sub">支持 pushplus / Server酱 / Bark / Telegram / 企业微信 / 钉钉 / 自定义 Webhook</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderNotifs()">刷新</button>
-    <button class="primary" onclick="notifForm()">+ 新建渠道</button></div></div>
+    ${canOp() ? `<button class="primary" onclick="notifForm()">+ 新建渠道</button>` : ""}</div></div>
     <div id="notif-list">加载中…</div>`;
   const j = await apiGet("/notifications"); if (j.code !== 0) return;
   const rows = j.data;
@@ -521,8 +571,8 @@ async function renderNotifs() {
     ${rows.map(n => `<tr><td><b>${esc(n.name)}</b> ${n.is_default ? badge("默认", "b-green") : ""}</td>
       <td>${badge(n.ntype, "b-blue")}</td><td>${n.is_default ? "是" : "否"}</td>
       <td>${n.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
-      <td class="nowrap"><button class="sm" onclick="testNotif(${n.id})">测试</button>
-      <button class="sm" onclick="notifForm(${n.id})">编辑</button><button class="sm danger" onclick="delNotif(${n.id})">删</button></td></tr>`).join("")}
+      <td class="nowrap">${canOp() ? `<button class="sm" onclick="testNotif(${n.id})">测试</button>
+      <button class="sm" onclick="notifForm(${n.id})">编辑</button><button class="sm danger" onclick="delNotif(${n.id})">删</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div>` : `<div class="card empty">暂无通知渠道</div>`;
 }
 function notifForm(id) {
@@ -558,7 +608,7 @@ async function delNotif(id) { if (!confirm("确认删除？")) return; const j =
 async function renderAI() {
   $("#main").innerHTML = `<div class="page-head"><div><h2>AI 对接</h2><div class="sub">兼容 OpenAI / DeepSeek / 通义 / 本地 Ollama，用于脚本生成与日志分析</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderAI()">刷新</button>
-    <button class="primary" onclick="aiForm()">+ 添加配置</button></div></div>
+    ${canOp() ? `<button class="primary" onclick="aiForm()">+ 添加配置</button>` : ""}</div></div>
     <div class="grid" style="grid-template-columns:1fr 1fr; gap:16px;">
       <div class="card"><div class="page-head"><h2 style="font-size:15px;">配置列表</h2></div><div id="ai-list">加载中…</div></div>
       <div class="card"><div class="page-head"><h2 style="font-size:15px;">智能助手</h2></div>
@@ -661,19 +711,19 @@ async function renderSystem() {
         <label>Python 路径（留空=自动）</label><input id="s_py" value="${esc(s.python_path || '')}">
         <label>Node 路径（留空=自动）</label><input id="s_node" value="${esc(s.node_path || '')}">
         <p class="muted" style="font-size:12px;">端口 / 并发等修改后需重启面板生效</p>
-        <button class="primary" onclick="saveSettings()">保存设置</button>
+        ${canAdmin() ? `<button class="primary" onclick="saveSettings()">保存设置</button>` : `<span class="muted">需管理员权限</span>`}
       </div>
       <div class="card"><div class="page-head"><h2 style="font-size:15px;">运维操作</h2></div>
         <p>当前面板版本：<b>${esc(info.data.version)}</b></p>
         <p>Python：${esc(info.data.python)} · Node：${esc(info.data.node)}</p>
         <p>内存：${info.data.mem_mb != null ? info.data.mem_mb + " MB" : "—"} · CPU：${info.data.cpu_percent != null ? info.data.cpu_percent + "%" : "—"}</p>
         <hr>
-        <div class="toolbar">
+        ${canAdmin() ? `<div class="toolbar">
           <button onclick="reloadScheduler()">重载调度器</button>
           <button onclick="doRestart()">🔄 重启服务</button>
           <button class="danger" onclick="doStop()">🛑 关闭服务</button>
           <button onclick="startDaemon()">🚀 启动守护进程</button>
-        </div>
+        </div>` : `<p class="muted">运维操作需管理员权限</p>`}
         <p class="muted" style="font-size:12px;margin-top:10px;">服务状态：运行中（PID <b id="svc_pid"></b>）· 关闭后可在本机双击 start.bat 重新启动，或使用上方「启动守护进程」</p>
         <p class="muted" style="font-size:12px;margin-top:12px;">开放 API Token（用于脚本/外部调用，Bearer 鉴权）：</p>
         <div class="mono" style="word-break:break-all;background:var(--bg);padding:8px;border-radius:8px;border:1px solid var(--border);" id="api-token">加载中…</div>
@@ -685,7 +735,7 @@ async function renderSystem() {
         <div class="toolbar">
           <button class="primary" onclick="exportBackup()">📥 导出全部设置(JSON)</button>
           <button onclick="exportDb()">📦 导出数据库文件</button>
-          <button onclick="importBackup()">📤 导入恢复</button>
+          ${canAdmin() ? `<button onclick="importBackup()">📤 导入恢复</button>` : ""}
         </div>
         <p class="muted" style="font-size:12px;margin-top:10px;">导入将覆盖现有同名配置，请谨慎操作；数据库文件含日志等完整数据。</p>
       </div>
@@ -695,8 +745,8 @@ async function renderSystem() {
         <div class="row2"><div><label>分支</label><input id="gh_branch" value="${esc(s.github_branch || 'main')}"></div>
         <div><label>自动更新</label><select id="gh_auto"><option value="0">关闭</option><option value="1">每日自动</option></select></div></div>
         <p class="muted" style="font-size:12px;">填写仓库并「保存」后，点击「检查更新」可比对远程提交；「立即更新」执行 git pull 并重启以应用新版本（需为 git 仓库且已联网）。</p>
-        <div class="toolbar"><button class="primary" onclick="saveGithub()">保存仓库设置</button>
-        <button onclick="doUpdate()">⤴ 立即更新</button></div>
+        ${canAdmin() ? `<div class="toolbar"><button class="primary" onclick="saveGithub()">保存仓库设置</button>
+        <button onclick="doUpdate()">⤴ 立即更新</button></div>` : `<p class="muted">需管理员权限</p>`}
         <div id="update-status" class="muted" style="font-size:12px;margin-top:10px;">尚未检查更新</div>
       </div>
     </div>`;
@@ -892,12 +942,172 @@ async function testYyb() {
   loadYybConn();
 }
 
+/* ---------- 系统监控 ---------- */
+let cpuHist = [];
+async function renderMonitor() {
+  if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+  $("#main").innerHTML = `<div class="page-head"><div><h2>系统监控</h2><div class="sub">实时 CPU / 内存 / 磁盘 / 网络（每 2 秒刷新）</div></div>
+    <div class="toolbar"><button class="ghost" onclick="renderMonitor()">刷新</button></div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr; gap:16px;">
+      <div class="card"><div class="page-head"><h2 style="font-size:15px;">资源占用</h2></div>
+        <div id="m-cpu" class="metric">CPU：<b>—</b></div>
+        <div class="bar"><span id="m-cpu-bar"></span></div>
+        <div id="m-mem" class="metric">内存：<b>—</b></div>
+        <div class="bar"><span id="m-mem-bar"></span></div>
+        <div id="m-disk" class="metric">磁盘：<b>—</b></div>
+        <div class="bar"><span id="m-disk-bar"></span></div>
+        <div id="m-net" class="metric">网络：<b>—</b></div>
+      </div>
+      <div class="card"><div class="page-head"><h2 style="font-size:15px;">CPU 使用率曲线</h2></div>
+        <canvas id="m-canvas" width="420" height="200" style="width:100%;height:200px;"></canvas>
+      </div>
+    </div>`;
+  cpuHist = [];
+  await loadMetrics();
+  metricsTimer = setInterval(loadMetrics, 2000);
+}
+async function loadMetrics() {
+  const j = await apiGet("/system/metrics").catch(() => ({ code: 1 }));
+  if (j.code !== 0) return;
+  const d = j.data;
+  if (d.cpu != null) {
+    $("#m-cpu").innerHTML = "CPU：<b>" + d.cpu + "%</b>";
+    $("#m-cpu-bar").style.width = d.cpu + "%";
+    cpuHist.push(d.cpu); if (cpuHist.length > 60) cpuHist.shift();
+    drawCpu();
+  }
+  if (d.mem) {
+    $("#m-mem").innerHTML = "内存：<b>" + d.mem.used_mb + " / " + d.mem.total_mb + " MB（" + d.mem.percent + "%）</b>";
+    $("#m-mem-bar").style.width = d.mem.percent + "%";
+  }
+  if (d.disk) {
+    $("#m-disk").innerHTML = "磁盘：<b>" + d.disk.used_gb + " / " + d.disk.total_gb + " GB（" + d.disk.percent + "%）</b>";
+    $("#m-disk-bar").style.width = d.disk.percent + "%";
+  }
+  if (d.net) {
+    $("#m-net").innerHTML = "网络：↑ <b>" + d.net.sent_kb_s + " KB/s</b> · ↓ <b>" + d.net.recv_kb_s + " KB/s</b>";
+  }
+}
+function drawCpu() {
+  const c = document.getElementById("m-canvas"); if (!c) return;
+  const ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = "rgba(128,128,128,0.2)";
+  for (let i = 0; i <= 4; i++) { const y = H * i / 4; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  const n = cpuHist.length; if (!n) return;
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent") || "#4f9cf9";
+  ctx.lineWidth = 2; ctx.beginPath();
+  cpuHist.forEach((v, i) => { const x = n > 1 ? W * i / (n - 1) : 0; const y = H - (v / 100) * H; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+  ctx.stroke();
+}
+
+/* ---------- 文件管理 ---------- */
+let fileCurPath = "";
+async function renderFiles() {
+  if (filesTimer) { clearInterval(filesTimer); filesTimer = null; }
+  $("#main").innerHTML = `<div class="page-head"><div><h2>文件管理</h2><div class="sub">浏览与编辑 data/ 目录下的文件（已限制在该目录内，防越权）</div></div>
+    <div class="toolbar"><button class="ghost" onclick="renderFiles()">刷新</button>
+    <button class="primary" onclick="newFile()">+ 新建文件</button>
+    <button class="ghost" onclick="newFolder()">+ 新建文件夹</button></div></div>
+    <div class="card"><div id="file-path" class="muted" style="margin-bottom:10px;word-break:break-all;"></div>
+    <div id="file-list">加载中…</div></div>`;
+  await loadFiles("");
+}
+async function loadFiles(path) {
+  fileCurPath = path || "";
+  const j = await apiGet("/files/tree?path=" + encodeURIComponent(fileCurPath)); if (j.code !== 0) return;
+  $("#file-path").textContent = "data/" + (j.data.path || "");
+  const es = j.data.entries || [];
+  if (!es.length) { $("#file-list").innerHTML = `<div class="empty">空目录</div>`; return; }
+  $("#file-list").innerHTML = `<table><thead><tr><th>名称</th><th>类型</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>
+    ${es.map(e => `<tr><td>${e.is_dir ? "📁" : "📄"} <b>${esc(e.name)}</b></td>
+      <td>${e.is_dir ? "目录" : "文件"}</td>
+      <td class="muted">${e.is_dir ? "-" : fmtSize(e.size)}</td>
+      <td class="muted nowrap">${new Date(e.mtime * 1000).toLocaleString()}</td>
+      <td class="nowrap">${e.is_dir ? `<button class="sm" onclick="openFolder('${encodeURIComponent(e.path)}')">打开</button>` : `<button class="sm" onclick="editFile('${encodeURIComponent(e.path)}')">编辑</button>`}
+        ${canAdmin() ? `<button class="sm danger" onclick="delFile('${encodeURIComponent(e.path)}')">删</button>` : ""}</td></tr>`).join("")}
+  </tbody></table>`;
+}
+function openFolder(p) { loadFiles(decodeURIComponent(p)); }
+async function editFile(p) {
+  const path = decodeURIComponent(p);
+  const j = await apiGet("/files/content?path=" + encodeURIComponent(path));
+  if (j.code !== 0) return toast(j.msg, false);
+  const html = `<label>${esc(path)}</label><textarea id="fe_content" style="min-height:360px;font-family:monospace;">${esc(j.data.content || "")}</textarea>`;
+  openModal("编辑 · " + path, html, `<button class="ghost" onclick="closeModal()">取消</button><button class="primary" onclick="saveFile('${encodeURIComponent(path)}')">保存</button>`, true);
+}
+async function saveFile(p) {
+  const path = decodeURIComponent(p);
+  const j = await apiPost("/files/write", { path, content: $("#fe_content").value }).catch(() => ({ code: 1, msg: "保存失败" }));
+  if (j.code === 0) { toast("已保存"); closeModal(); loadFiles(fileCurPath); } else toast(j.msg, false);
+}
+function newFile() {
+  const name = prompt("文件名（可含子目录，如 sub/a.py）："); if (!name) return;
+  const path = (fileCurPath ? fileCurPath + "/" : "") + name.trim();
+  openModal("新建文件 · " + path, `<label>${esc(path)}</label><textarea id="fe_content" style="min-height:320px;font-family:monospace;"></textarea>`,
+    `<button class="ghost" onclick="closeModal()">取消</button><button class="primary" onclick="saveFile('${encodeURIComponent(path)}')">保存</button>`, true);
+}
+function newFolder() {
+  const name = prompt("文件夹名："); if (!name) return;
+  const path = (fileCurPath ? fileCurPath + "/" : "") + name.trim();
+  apiPost("/files/mkdir", { path }).then(j => { if (j.code === 0) { toast("已创建"); loadFiles(fileCurPath); } else toast(j.msg, false); });
+}
+async function delFile(p) {
+  const path = decodeURIComponent(p); if (!confirm("确认删除 " + path + "？")) return;
+  const j = await apiPost("/files/delete", { path }).catch(() => ({ code: 1, msg: "删除失败" }));
+  if (j.code === 0) { toast("已删除"); loadFiles(fileCurPath); } else toast(j.msg, false);
+}
+
+/* ---------- 用户管理（管理员） ---------- */
+async function renderUsers() {
+  if (!canAdmin()) { toast("需要管理员权限", false); navigate("dashboard"); return; }
+  $("#main").innerHTML = `<div class="page-head"><div><h2>用户管理</h2><div class="sub">多用户与角色权限（管理员 / 操作员 / 只读）</div></div>
+    <div class="toolbar"><button class="ghost" onclick="renderUsers()">刷新</button>
+    <button class="primary" onclick="userForm()">+ 新建用户</button></div></div>
+    <div id="user-list">加载中…</div>`;
+  const j = await apiGet("/users"); if (j.code !== 0) return;
+  const rows = j.data;
+  $("#user-list").innerHTML = rows.length ? `<div class="card" style="padding:0;"><table><thead><tr>
+    <th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
+    ${rows.map(u => `<tr><td><b>${esc(u.username)}</b></td>
+      <td>${badge(roleText(u.role), u.role === "admin" ? "b-red" : u.role === "op" ? "b-blue" : "b-gray")}</td>
+      <td>${u.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
+      <td class="muted nowrap">${esc(u.created_at || "")}</td>
+      <td class="nowrap"><button class="sm" onclick="userForm(${u.id})">编辑</button>
+      <button class="sm danger" onclick="delUser(${u.id})">删</button></td></tr>`).join("")}
+  </tbody></table></div>` : `<div class="card empty">暂无用户</div>`;
+}
+function userForm(id) {
+  const isEdit = !!id;
+  const html = `<label>用户名</label><input id="u_name" ${isEdit ? "disabled" : ""}>
+    <label>密码（${isEdit ? "留空则不修改" : "至少 6 位"}）</label><input id="u_pw" type="password">
+    <div class="row2"><div><label>角色</label><select id="u_role"><option value="viewer">只读</option><option value="op">操作员</option><option value="admin">管理员</option></select></div>
+    <div><label>状态</label><select id="u_status"><option value="1">启用</option><option value="0">停用</option></select></div></div>`;
+  openModal(isEdit ? "编辑用户" : "新建用户", html,
+    `<button class="ghost" onclick="closeModal()">取消</button><button class="primary" onclick="saveUser(${id || 0})">保存</button>`);
+  if (isEdit) apiGet("/users").then(j => { const u = j.data.find(x => x.id == id); if (!u) return;
+    $("#u_name").value = u.username; $("#u_role").value = u.role; $("#u_status").value = u.status; });
+}
+async function saveUser(id) {
+  const body = { username: $("#u_name").value.trim(), password: $("#u_pw").value, role: $("#u_role").value, status: parseInt($("#u_status").value) };
+  const j = id ? await apiPut("/users/" + id, body) : await apiPost("/users", body);
+  if (j.code === 0) { toast("已保存"); closeModal(); renderUsers(); } else toast(j.msg, false);
+}
+async function delUser(id) {
+  if (!confirm("确认删除该用户？")) return;
+  const j = await apiDel("/users/" + id);
+  if (j.code === 0) { toast("已删除"); renderUsers(); } else toast(j.msg, false);
+}
+
 /* ---------- 启动 ---------- */
 async function bootApp() {
   try {
     const me = await apiGet("/me");
     if (me.code !== 0) throw new Error("auth");
-    $("#uname").textContent = me.data.username;
+    ROLE = me.data.role || "admin";
+    localStorage.setItem("qd_role", ROLE);
+    $("#uname").textContent = me.data.username + "（" + roleText(me.data.role) + "）";
     hideLogin(); renderNav(); navigate("dashboard");
     // 预加载最近日志用于 AI 分析下拉
     apiGet("/logs?limit=30").then(j => {

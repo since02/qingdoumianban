@@ -37,6 +37,8 @@ def _register_routes():
     import routes.ai
     import routes.compat
     import routes.yybgo
+    import routes.users
+    import routes.files
     from routes import bp
     app.register_blueprint(bp)
     app.register_blueprint(routes.yybgo.yyb_bp)
