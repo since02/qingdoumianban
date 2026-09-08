@@ -34,6 +34,7 @@ const NAV = [
   { id: "files", icon: "🗂️", label: "文件管理" },
   { id: "monitor", icon: "📈", label: "系统监控" },
   { id: "yybgo", icon: "💬", label: "微信对接" },
+  { id: "jdcookie", icon: "🛒", label: "京东Cookie" },
   { id: "users", icon: "👥", label: "用户管理", adminOnly: true },
   { id: "system", icon: "⚙️", label: "系统设置" },
 ];
@@ -225,7 +226,7 @@ function navigate(view) {
     dashboard: renderDashboard, tasks: renderTasks, scripts: renderScripts,
     subs: renderSubs, deps: renderDeps, envs: renderEnvs, notifs: renderNotifs,
     ai: renderAI, files: renderFiles, monitor: renderMonitor, users: renderUsers,
-    yybgo: renderYybgo, system: renderSystem,
+    yybgo: renderYybgo, jdcookie: renderJdCookie, system: renderSystem,
   };
   (map[view] || renderDashboard)();
 }
@@ -940,6 +941,117 @@ async function testYyb() {
     if (m) m.textContent = j.data.ok ? "✅ 连接正常（HTTP " + j.data.status + "）" : ("❌ " + (j.data.msg || ("HTTP " + j.data.status)));
   } else if (m) m.textContent = (j.msg || "测试失败");
   loadYybConn();
+}
+
+/* ---------- 京东 Cookie（通过 yyb-go 微信登录态获取） ---------- */
+async function renderJdCookie() {
+  if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
+  if (window.jdTimer) { clearInterval(window.jdTimer); window.jdTimer = null; }
+  $("#main").innerHTML = `<div class="page-head"><div><h2>京东 Cookie</h2><div class="sub">复用已登录的微信账号（yyb-go）自动获取京东 pt_key/pt_pin，写入环境变量供青龙脚本使用</div></div>
+    <div class="toolbar"><button class="ghost" onclick="renderJdCookie()">刷新</button></div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+      <div class="card"><div class="page-head"><h2 style="font-size:15px;">yyb-go 连接状态</h2></div>
+        <div id="jd-conn" class="muted">检测中…</div>
+      </div>
+      <div class="card"><div class="page-head"><h2 style="font-size:15px;">京东 Cookie 设置</h2></div>
+        <label>环境变量名（脚本读取的键，默认 JD_COOKIE）</label><input id="jd_env_name" value="JD_COOKIE">
+        <div class="row2"><div><label>Cookie 模式</label><select id="jd_cookie_mode"><option value="pt">pt（仅 pt_key/pt_pin）</option><option value="all">all（全部 Cookie）</option></select></div>
+        <div><label>登录模式</label><select id="jd_login_mode"><option value="auto">auto</option><option value="code">code</option><option value="full">full</option></select></div></div>
+        <div class="row2"><div><label>自动刷新 cron</label><input id="jd_cron" value="0 */2 * * *" class="mono"></div>
+        <div><label class="flex" style="gap:8px;align-items:center;font-size:13px;margin-top:18px;"><input type="checkbox" id="jd_auto" style="width:auto;"> 启用自动刷新</label></div></div>
+        <div class="toolbar"><button class="primary" onclick="saveJdConfig()">保存设置</button>
+        <button onclick="jdRefreshAll()">🔄 一键刷新全部</button></div>
+        <p class="muted" style="font-size:12px;">auto 优先用小程序 code 登录；full 会携带微信用户信息提高成功率。启用自动刷新后按 cron 续期（京东 cookie 约 30 天有效）。</p>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px;"><div class="page-head"><h2 style="font-size:15px;">微信账号（点击获取京东 Cookie）</h2>
+      <div class="toolbar"><button class="ghost" onclick="loadJdAccounts()">刷新列表</button></div></div>
+      <div id="jd-accounts" class="muted">加载中…</div>
+    </div>
+    <div class="card"><div class="page-head"><h2 style="font-size:15px;">已获取的京东 Cookie</h2></div>
+      <div id="jd-cookies" class="muted">加载中…</div>
+    </div>`;
+  loadJdConfig();
+  loadJdAccounts();
+  window.jdTimer = setInterval(() => { if (CURRENT === "jdcookie") loadJdAccounts(); }, 15000);
+}
+async function loadJdConfig() {
+  const c = await apiGet("/jdcookie/config").catch(() => ({ code: 1 }));
+  if (c.code === 0 && c.data) {
+    $("#jd_env_name").value = c.data.cookie_env_name || "JD_COOKIE";
+    $("#jd_cookie_mode").value = c.data.cookie_mode || "pt";
+    $("#jd_login_mode").value = c.data.login_mode || "auto";
+    $("#jd_cron").value = c.data.auto_refresh_cron || "0 */2 * * *";
+    $("#jd_auto").checked = !!c.data.auto_refresh;
+  }
+}
+async function saveJdConfig() {
+  const j = await apiPost("/jdcookie/config", {
+    cookie_env_name: $("#jd_env_name").value.trim() || "JD_COOKIE",
+    cookie_mode: $("#jd_cookie_mode").value,
+    login_mode: $("#jd_login_mode").value,
+    auto_refresh_cron: $("#jd_cron").value.trim() || "0 */2 * * *",
+    auto_refresh: $("#jd_auto").checked,
+  }).catch(() => ({ code: 1, msg: "保存失败" }));
+  toast(j.code === 0 ? "京东 Cookie 设置已保存（自动刷新需重启调度生效）" : (j.msg || "保存失败"), j.code === 0);
+}
+async function loadJdAccounts() {
+  const cj = await apiGet("/jdcookie/connection").catch(() => ({ code: 1, msg: "请求失败" }));
+  const conn = $("#jd-conn");
+  if (conn) {
+    if (cj.code !== 0) conn.innerHTML = `<span class="badge b-red">检测失败</span> ${esc(cj.msg || "")}`;
+    else {
+      const d = cj.data || {};
+      if (!d.enabled) conn.innerHTML = `<span class="dot gray"></span><b>未启用</b> · 请先在「微信对接」开启 yyb-go`;
+      else if (d.connected) conn.innerHTML = `<span class="dot green"></span><b>已连接</b> · ${esc(d.url)}`;
+      else conn.innerHTML = `<span class="dot red"></span><b>未连接</b> · ${esc(d.url)} ${d.error ? "（" + esc(d.error) + "）" : ""}`;
+    }
+  }
+  const accs = (cj.data && cj.data.accounts) || [];
+  const accBox = $("#jd-accounts");
+  if (accBox) {
+    if (!cj.data || !cj.data.connected) accBox.innerHTML = `<span class="muted">未连接到 yyb-go，无法获取微信账号。</span>`;
+    else if (!accs.length) accBox.innerHTML = `<span class="muted">暂无已登录微信账号，请在 yyb-go 中扫码登录后刷新。</span>`;
+    else accBox.innerHTML = `<table><thead><tr><th>微信账号</th><th>状态</th><th>操作</th></tr></thead><tbody>
+      ${accs.map(a => { const ref = a.openid || a.uin || a.id || ""; const label = a.label || a.nickname || "未知";
+        return `<tr><td><b>${esc(label)}</b></td><td>${a.status ? badge(a.status, a.status === "alive" ? "b-green" : "b-gray") : badge("未知", "b-gray")}</td>
+        <td><button class="sm" data-ref="${esc(ref)}" data-name="${esc(label)}" onclick="jdRefresh(this.dataset.ref, this.dataset.name)">获取 Cookie</button></td></tr>`; }).join("")}
+    </tbody></table>`;
+  }
+  const ck = await apiGet("/jdcookie/accounts").catch(() => ({ code: 1, data: [] }));
+  const ckBox = $("#jd-cookies");
+  if (!ckBox) return;
+  const list = ck.data || [];
+  if (!list.length) { ckBox.innerHTML = `<span class="muted">尚未获取任何京东 Cookie。点击上方微信账号的「获取 Cookie」开始（需 yyb-go 已连接且微信已登录）。</span>`; return; }
+  ckBox.innerHTML = `<table><thead><tr><th>微信账号</th><th>京东账号(pt_pin)</th><th>状态</th><th>最后更新</th><th>过期</th><th>操作</th></tr></thead><tbody>
+    ${list.map(r => `<tr>
+      <td><b>${esc(r.name || r.ref)}</b></td>
+      <td class="mono nowrap">${esc(r.pt_pin || "—")}</td>
+      <td>${r.status === "ok" ? badge("正常", "b-green") : badge("失败", "b-red")}</td>
+      <td class="muted nowrap">${esc(r.last_update || "—")}</td>
+      <td class="muted nowrap">${esc(r.expire_at || "—")}</td>
+      <td><button class="sm" data-ref="${esc(r.ref)}" data-name="${esc(r.name || "")}" onclick="jdRefresh(this.dataset.ref, this.dataset.name)">刷新</button>
+      <button class="sm danger" data-ref="${esc(r.ref)}" onclick="jdDeleteAccount(this.dataset.ref)">删</button></td></tr>`).join("")}
+  </tbody></table>`;
+}
+async function jdRefresh(ref, name) {
+  if (!ref) return toast("缺少账号 ref", false);
+  toast("正在获取京东 Cookie…", true);
+  const j = await apiPost("/jdcookie/refresh", { ref, name }).catch(() => ({ code: 1, msg: "请求失败" }));
+  toast(j.code === 0 ? (j.msg || "获取成功") : (j.msg || "获取失败"), j.code === 0);
+  if (j.code === 0) loadJdAccounts();
+}
+async function jdRefreshAll() {
+  toast("正在刷新全部账号…", true);
+  const j = await apiPost("/jdcookie/refresh_all", {}).catch(() => ({ code: 1, msg: "请求失败" }));
+  toast(j.code === 0 ? (j.msg || "完成") : (j.msg || "失败"), j.code === 0);
+  if (j.code === 0) loadJdAccounts();
+}
+async function jdDeleteAccount(ref) {
+  if (!confirm("确认删除该账户记录？（不会删除已写入的环境变量）")) return;
+  const j = await apiPost("/jdcookie/account/delete", { ref }).catch(() => ({ code: 1, msg: "删除失败" }));
+  toast(j.code === 0 ? "已删除" : (j.msg || "删除失败"), j.code === 0);
+  if (j.code === 0) loadJdAccounts();
 }
 
 /* ---------- 系统监控 ---------- */

@@ -116,6 +116,33 @@ def _ensure_auto_update_job():
         print(f"[青豆面板] 自动更新任务注册失败: {e}")
 
 
+def _jd_auto_refresh_job():
+    """按配置定时刷新所有微信账号的京东 cookie。"""
+    try:
+        from routes.jdcookie import auto_refresh_job
+        auto_refresh_job()
+    except Exception as e:
+        print(f"[青豆面板] 京东 Cookie 自动刷新异常: {e}")
+
+
+def _ensure_jd_autorefresh_job():
+    sched = get_scheduler()
+    try:
+        sched.remove_job("qd-jd-cookie-refresh")
+    except Exception:
+        pass
+    try:
+        from core import db
+        row = db.query_one("SELECT auto_refresh_cron,auto_refresh FROM jdcookie_config WHERE id=1")
+        if not row or not row["auto_refresh"]:
+            return
+        cron = row["auto_refresh_cron"] or "0 */2 * * *"
+        sched.add_job(_jd_auto_refresh_job, CronTrigger.from_crontab(cron, timezone=_tz()),
+                      id="qd-jd-cookie-refresh", replace_existing=True, max_instances=1)
+    except Exception as e:
+        print(f"[青豆面板] 京东 Cookie 自动刷新任务注册失败: {e}")
+
+
 def reload_all():
     """加载所有启用的任务与订阅到调度器。"""
     for t in db.query("SELECT * FROM tasks WHERE status=1"):
@@ -131,6 +158,11 @@ def reload_all():
                 get_scheduler().remove_job("qd-auto-update")
             except Exception:
                 pass
+    except Exception:
+        pass
+    # 可选：京东 Cookie 自动刷新（按配置的 cron），需启用
+    try:
+        _ensure_jd_autorefresh_job()
     except Exception:
         pass
 

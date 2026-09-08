@@ -112,6 +112,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     role TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
+CREATE TABLE IF NOT EXISTS jdcookie_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    jd_appid TEXT DEFAULT 'wx91d27dbf599dff74',
+    jd_pt_appid TEXT DEFAULT 'wx2f5d8f9715c59d10',
+    cookie_env_name TEXT DEFAULT 'JD_COOKIE',
+    cookie_mode TEXT DEFAULT 'pt',
+    login_mode TEXT DEFAULT 'auto',
+    auto_refresh_cron TEXT DEFAULT '0 */2 * * *',
+    auto_refresh INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS jdcookie_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref TEXT UNIQUE NOT NULL,
+    name TEXT,
+    openid TEXT,
+    pt_pin TEXT,
+    cookie TEXT,
+    status TEXT DEFAULT '',
+    last_update TEXT,
+    expire_at TEXT,
+    errmsg TEXT
+);
 """
 
 _local = threading.local()
@@ -169,6 +191,14 @@ def _migrate(conn):
                 "INSERT INTO users(username,pw_hash,role,status) VALUES(?,?,?,?)",
                 (DEFAULT_USERNAME, hash_password(DEFAULT_PASSWORD), "admin", 1),
             )
+    except Exception:
+        pass
+    # 京东 Cookie 配置默认值（单行 id=1）
+    try:
+        if not conn.execute("SELECT 1 FROM jdcookie_config WHERE id=1").fetchone():
+            conn.execute(
+                "INSERT INTO jdcookie_config(id,jd_appid,jd_pt_appid,cookie_env_name,cookie_mode,login_mode,auto_refresh_cron,auto_refresh) "
+                "VALUES(1,'wx91d27dbf599dff74','wx2f5d8f9715c59d10','JD_COOKIE','pt','auto','0 */2 * * *',0)")
     except Exception:
         pass
 
