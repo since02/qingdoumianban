@@ -53,7 +53,23 @@ async function api(method, path, body) {
   if (body !== undefined) { headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
   const r = await fetch(API_BASE + "/api" + path, opt);
   if (r.status === 401) { showLogin(); throw new Error("未授权"); }
-  const j = await r.json().catch(() => ({ code: 1, msg: "响应解析失败", data: null }));
+  const text = await r.text();
+  if (!text.trim()) {
+    return { code: 1, msg: `服务器返回空响应（HTTP ${r.status}）`, data: null };
+  }
+  let j;
+  try { j = JSON.parse(text); }
+  catch (e) {
+    let tip = text.slice(0, 80).replace(/\s+/g, " ");
+    if (r.status === 404) {
+      tip = `接口未找到（HTTP 404），请重启面板以加载最新代码`;
+    } else if (r.status >= 500) {
+      tip = `服务器内部错误（HTTP ${r.status}）：${tip}`;
+    } else {
+      tip = `响应解析失败（HTTP ${r.status}）：${tip}`;
+    }
+    return { code: 1, msg: tip, data: null };
+  }
   return j;
 }
 async function apiGet(path) { return api("GET", path); }
@@ -76,11 +92,15 @@ $("#overlay").addEventListener("click", e => { if (e.target.id === "overlay") cl
 function showLogin() {
   $("#app").classList.add("hidden");
   $("#login").style.display = "flex";
+  const tbtn = $("#theme-toggle-login");
+  if (tbtn) tbtn.style.display = "inline-block";
   refreshLoginOptions();
 }
 function hideLogin() {
   $("#login").style.display = "none";
   $("#app").classList.remove("hidden");
+  const tbtn = $("#theme-toggle-login");
+  if (tbtn) tbtn.style.display = "none";
 }
 async function doLogin() {
   const username = $("#login-user").value.trim();
@@ -358,22 +378,55 @@ async function renderSubs() {
   </tbody></table></div>`;
 }
 function subForm(id) {
-  const html = `<label>订阅名称</label><input id="sub_name">
+  const html = `<label>粘贴青龙 <b>ql repo</b> 命令（自动识别并填充下方字段）</label>
+    <textarea id="sub_ql" rows="2" placeholder='ql repo https://github.com/user/repo.git "jd_|jx_|jddj_" "backUp" "^jd[^_]|USER|JD|function|sendNotify|utils" main'></textarea>
+    <div style="margin:4px 0 10px;"><button type="button" class="sm" onclick="parseQlCmd()">解析并填充</button>
+      <span class="muted" style="font-size:12px;">支持 ql repo / ql raw，代理前缀地址也会自动识别</span></div>
+    <hr class="mt">
+    <label>订阅名称</label><input id="sub_name">
     <label>类型</label><select id="sub_type"><option value="git">Git 仓库</option><option value="json">青龙格式 JSON 清单</option></select>
     <label>地址（git 仓库 URL 或 JSON 清单 URL）</label><input id="sub_url" placeholder="https://github.com/user/repo.git">
     <div class="row2"><div><label>分支（git 用）</label><input id="sub_branch" value="main"></div>
     <div><label>别名（目录名/脚本前缀）</label><input id="sub_alias" placeholder="myrepo"></div></div>
     <div class="row2"><div><label>同步计划 cron</label><input id="sub_sched" value="0 0 * * *" class="mono"></div>
-    <div><label>状态</label><select id="sub_status"><option value="1">启用</option><option value="0">停用</option></select></div></div>`;
+    <div><label>状态</label><select id="sub_status"><option value="1">启用</option><option value="0">停用</option></select></div></div>
+    <label>白名单（含这些关键词才导入，竖线分隔，留空=全部）</label><input id="sub_white" placeholder="jd_|jx_|jddj_">
+    <label>黑名单（匹配则跳过，竖线分隔）</label><input id="sub_black" placeholder="backUp">
+    <label>依赖过滤（命中的文件视为依赖、不导入为任务，竖线分隔）</label><input id="sub_dep" placeholder="^jd[^_]|USER|JD|function|sendNotify|utils">`;
   openModal(id ? "编辑订阅" : "新建订阅", html,
     `<button class="ghost" onclick="closeModal()">取消</button><button class="primary" onclick="saveSub(${id || 0})">保存</button>`);
   if (id) apiGet("/subscriptions").then(j => { const s = j.data.find(x => x.id == id); if (!s) return;
     $("#sub_name").value = s.name; $("#sub_type").value = s.stype; $("#sub_url").value = s.url;
-    $("#sub_branch").value = s.branch; $("#sub_alias").value = s.alias; $("#sub_sched").value = s.schedule; $("#sub_status").value = s.status; });
+    $("#sub_branch").value = s.branch; $("#sub_alias").value = s.alias; $("#sub_sched").value = s.schedule; $("#sub_status").value = s.status;
+    $("#sub_white").value = s.whitelist || ""; $("#sub_black").value = s.blacklist || ""; $("#sub_dep").value = s.dependence || ""; });
+}
+async function parseQlCmd() {
+  const cmd = ($("#sub_ql").value || "").trim();
+  if (!cmd) return toast("请先粘贴 ql repo 命令", false);
+  const btn = $("button[onclick='parseQlCmd()']");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "解析中…"; }
+  try {
+    const j = await apiPost("/subscriptions/parse-ql", { command: cmd });
+    if (j.code !== 0) return toast(j.msg || "解析失败", false);
+    const d = j.data;
+    if (d.name) $("#sub_name").value = d.name;
+    if (d.alias) $("#sub_alias").value = d.alias;
+    if (d.url) $("#sub_url").value = d.url;
+    if (d.branch) $("#sub_branch").value = d.branch;
+    if (d.stype) $("#sub_type").value = d.stype;
+    if (d.whitelist !== undefined) $("#sub_white").value = d.whitelist;
+    if (d.blacklist !== undefined) $("#sub_black").value = d.blacklist;
+    if (d.dependence !== undefined) $("#sub_dep").value = d.dependence;
+    toast("已自动识别并填充 ✅");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || "解析并填充"; }
+  }
 }
 async function saveSub(id) {
   const body = { name: $("#sub_name").value.trim(), stype: $("#sub_type").value, url: $("#sub_url").value.trim(),
-    branch: $("#sub_branch").value.trim(), alias: $("#sub_alias").value.trim(), schedule: $("#sub_sched").value.trim(), status: parseInt($("#sub_status").value) };
+    branch: $("#sub_branch").value.trim(), alias: $("#sub_alias").value.trim(), schedule: $("#sub_sched").value.trim(), status: parseInt($("#sub_status").value),
+    whitelist: $("#sub_white").value.trim(), blacklist: $("#sub_black").value.trim(), dependence: $("#sub_dep").value.trim() };
   const j = id ? await apiPut("/subscriptions/" + id, body) : await apiPost("/subscriptions", body);
   if (j.code === 0) { toast("已保存"); closeModal(); renderSubs(); } else toast(j.msg, false);
 }
