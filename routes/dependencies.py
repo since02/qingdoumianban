@@ -1,5 +1,6 @@
 """青豆面板 - 依赖安装（pip / npm / 系统包），后台执行并记录日志。"""
 import os
+import re
 import time
 import threading
 from flask import request
@@ -10,22 +11,26 @@ from routes import bp, json_ok, json_err, auth_required, get_json_body
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(BASE_DIR, "data", "logs")
 
+# 包名/参数白名单：仅允许常见包名与版本限定符，拦截 shell 元字符（; | & $ ` ( ) 等）
+_SAFE_PKG = re.compile(r"^[A-Za-z0-9._@+!=<>:~/\-]+$")
 
-def _shq(s):
-    """Windows 下把可执行文件路径统一成反斜杠，含空格则加引号。"""
-    s = s.strip()
-    if os.name == "nt":
-        s = s.replace("/", "\\")
-    return f'"{s}"' if " " in s else s
+
+def _validate_packages(packages):
+    toks = (packages or "").split()
+    bad = [t for t in toks if not _SAFE_PKG.match(t)]
+    if bad:
+        return None, "非法的包名或参数: " + " ".join(bad)
+    return toks, None
 
 
 def _install_worker(dep_id, dtype, command, log_path):
     with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
-        lf.write(f"[青豆面板] 安装依赖（{dtype}）: {command}\n")
+        lf.write(f"[青豆面板] 安装依赖（{dtype}）: {' '.join(command)}\n")
         lf.flush()
         import subprocess
         try:
-            proc = subprocess.Popen(command, shell=True, stdout=lf, stderr=subprocess.STDOUT,
+            # 以参数列表方式执行，shell=False，从根本上消除命令注入
+            proc = subprocess.Popen(command, shell=False, stdout=lf, stderr=subprocess.STDOUT,
                                     cwd=BASE_DIR)
             proc.wait(timeout=600)
             rc = proc.returncode
@@ -47,17 +52,18 @@ def install_dep():
     packages = (b.get("packages") or "").strip()
     if not packages:
         return json_err("请填写要安装的依赖")
+    toks, err = _validate_packages(packages)
+    if err:
+        return json_err(err)
     if dtype == "pip":
         pip = (b.get("pip") or "").strip()
-        if pip and pip not in ("pip",):
-            command = f"{_shq(pip)} install {packages}"
-        else:
-            command = f'{_shq(_exec.get_python_path())} -m pip install {packages}'
+        base = [pip] if (pip and pip not in ("pip",)) else [_exec.get_python_path()]
+        command = base + ["-m", "pip", "install"] + toks
     elif dtype == "npm":
         npm = (b.get("npm") or "npm").strip() or "npm"
-        command = f"{_shq(npm)} install -g {packages}"
+        command = [npm, "install", "-g"] + toks
     elif dtype == "apt":
-        command = f'apt-get install -y {packages}'
+        command = ["apt-get", "install", "-y"] + toks
     else:
         return json_err("不支持的依赖类型")
     os.makedirs(LOGS_DIR, exist_ok=True)

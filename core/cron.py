@@ -26,8 +26,3 @@ def is_valid_cron(expr: str) -> bool:
         return True
     except Exception:
         return False
-
-
-def human_cron(expr: str) -> str:
-    """粗略的中文描述（可选展示用）。"""
-    return expr

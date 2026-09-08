@@ -31,10 +31,6 @@ def _post(url, payload, headers=None):
         return -1, str(e)[:200]
 
 
-def _escape_markdown(text):
-    return (text or "").replace("\n", "\n\n")
-
-
 def send_one(ntype, cfg, title, content):
     cfg = cfg or {}
     if ntype == "pushplus":

@@ -1,6 +1,7 @@
 """青豆面板 - 配置 / 设置 / 鉴权 工具。"""
 import os
 import re
+import hmac
 import hashlib
 import secrets
 from core import db
@@ -35,6 +36,10 @@ def ensure_defaults():
     port = db.query_one("SELECT value FROM settings WHERE key='port'")
     if port is None:
         db.execute("INSERT INTO settings(key,value) VALUES(?,?)", ("port", "5700"))
+    # 默认监听地址（0.0.0.0 便于服务器/局域网部署，可改 127.0.0.1 仅本机）
+    host = db.query_one("SELECT value FROM settings WHERE key='host'")
+    if host is None:
+        db.execute("INSERT INTO settings(key,value) VALUES(?,?)", ("host", "0.0.0.0"))
     # 默认并发
     conc = db.query_one("SELECT value FROM settings WHERE key='max_concurrent'")
     if conc is None:
@@ -63,6 +68,14 @@ def ensure_defaults():
 
 
 def hash_password(pw: str) -> str:
+    """加盐 SHA-256 哈希，存储格式： sha256$<salt_hex>$<hash_hex>。"""
+    salt = secrets.token_hex(16)
+    dig = hashlib.sha256((salt + pw).encode("utf-8")).hexdigest()
+    return f"sha256${salt}${dig}"
+
+
+def _legacy_hash(pw: str) -> str:
+    """兼容旧版无盐哈希（qingdou:: 前缀）。"""
     return hashlib.sha256(("qingdou::" + pw).encode("utf-8")).hexdigest()
 
 
@@ -70,7 +83,19 @@ def verify_password(pw: str) -> bool:
     row = db.query_one("SELECT value FROM settings WHERE key='admin_password'")
     if row is None:
         return False
-    return row["value"] == hash_password(pw)
+    stored = row["value"]
+    if stored.startswith("sha256$"):
+        try:
+            _, salt, dig = stored.split("$", 2)
+        except ValueError:
+            return False
+        calc = hashlib.sha256((salt + pw).encode("utf-8")).hexdigest()
+        return hmac.compare_digest(calc, dig)
+    # 兼容旧版无盐哈希：验证通过则自动迁移为加盐格式（不影响已登录态）
+    if stored == _legacy_hash(pw):
+        set_setting("admin_password", hash_password(pw))
+        return True
+    return False
 
 
 def get_setting(key, default=None):

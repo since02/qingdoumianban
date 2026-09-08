@@ -171,6 +171,9 @@ def create_qr():
     img = data.get("image_base64")
     if not img:
         return json_err("yyb-go 未返回二维码")
+    # 补前缀：部分 yyb-go 返回裸 base64，前端 <img src> 需 data:image/png;base64, 前缀才能渲染
+    if not img.startswith("data:"):
+        img = "data:image/png;base64," + img
     return json_ok({"session_id": data.get("session_id"), "image": img,
                     "status": data.get("status", "")})
 

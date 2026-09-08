@@ -1,6 +1,7 @@
 """青豆面板 - 系统设置 / 仪表盘 / 重启 / 备份 / 更新 路由。"""
 import os
 import sys
+import re
 import json as _json
 import time
 import socket
@@ -83,7 +84,7 @@ def system_info():
 @bp.route("/system/settings", methods=["GET"])
 @auth_required
 def get_settings():
-    keys = ["port", "max_concurrent", "task_timeout", "timezone", "python_path", "node_path",
+    keys = ["host", "port", "max_concurrent", "task_timeout", "timezone", "python_path", "node_path",
             "github_repo", "github_branch", "github_auto_update"]
     data = {k: config.get_setting(k) for k in keys}
     return json_ok(data)
@@ -93,11 +94,11 @@ def get_settings():
 @auth_required
 def save_settings():
     b = get_json_body()
-    for k in ["port", "max_concurrent", "task_timeout", "timezone", "python_path", "node_path",
+    for k in ["host", "port", "max_concurrent", "task_timeout", "timezone", "python_path", "node_path",
               "github_repo", "github_branch", "github_auto_update"]:
         if k in b:
             config.set_setting(k, b[k])
-    return json_ok(msg="已保存（端口/并发等需重启面板后生效）")
+    return json_ok(msg="已保存（host/端口/并发等需重启面板后生效）")
 
 
 def _port_listening(port):
@@ -182,8 +183,9 @@ def reload_scheduler():
 
 
 # ============ 备份 / 恢复（导出全部设置项目） ============
+# 注：脚本以文件形式存于 data/scripts，由备份的 files 段负责；DB 中的 scripts 表已废弃不再写入，故不在此列出。
 BACKUP_TABLES = ["settings", "tasks", "subscriptions", "environments",
-                 "notifications", "ai_configs", "dependencies", "scripts"]
+                 "notifications", "ai_configs", "dependencies"]
 
 
 @bp.route("/system/backup", methods=["GET"])
@@ -258,6 +260,11 @@ def backup_restore():
                 if k is not None:
                     config.set_setting(k, row.get("value"))
             continue
+        # 仅允许本表真实存在的列（白名单），列名须符合标识符规范，杜绝不受信 JSON 的列名注入
+        try:
+            allowed = {r["name"] for r in db.query(f"PRAGMA table_info({t})")}
+        except Exception:
+            continue
         try:
             db.execute(f"DELETE FROM {t}")
         except Exception:
@@ -265,7 +272,8 @@ def backup_restore():
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            cols = list(row.keys())
+            cols = [c for c in row.keys()
+                    if c in allowed and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(c))]
             if not cols:
                 continue
             ph = ",".join("?" for _ in cols)

@@ -48,15 +48,17 @@ def bootstrap():
 
 
 def _serve_with_retry(app, port, max_retries=20, retry_interval=0.5):
-    """启动 HTTP 服务；若端口暂被占用（如重启交接期）则重试，直到成功或耗尽次数。"""
+    """启动 HTTP 服务；若端口暂被占用（如重启交接期）则重试，直到成功或耗尽次数。
+    监听地址取自设置 host（默认 0.0.0.0，可改 127.0.0.1 仅本机）。"""
+    host = config.get_setting("host", "0.0.0.0") or "0.0.0.0"
     for attempt in range(max_retries):
         try:
             try:
                 from waitress import serve
-                serve(app, host="0.0.0.0", port=port, threads=8, ident="Qingdou")
+                serve(app, host=host, port=port, threads=8, ident="Qingdou")
                 return
             except Exception:
-                app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+                app.run(host=host, port=port, threaded=True, use_reloader=False)
                 return
         except OSError as e:
             if attempt < max_retries - 1:
