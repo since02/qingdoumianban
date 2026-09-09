@@ -87,3 +87,35 @@ def sync_sub(sid):
         return json_err("订阅不存在")
     res = run_sub_now(sid)
     return json_ok({"status": res}, msg="已提交同步")
+
+
+@bp.route("/subscriptions/<int:sid>/logs", methods=["GET"])
+@auth_required
+def sub_logs(sid):
+    """某订阅的同步日志列表（最近 50 条）。"""
+    rows = db.query(
+        "SELECT id,started_at,finished_at,status FROM logs "
+        "WHERE sub_id=? AND kind='sub' ORDER BY id DESC LIMIT 50", (sid,))
+    return json_ok([dict(r) for r in rows])
+
+
+@bp.route("/subscriptions/logs/<int:log_id>", methods=["GET"])
+@auth_required
+def sub_log_content(log_id):
+    """读取一条订阅同步日志的内容。"""
+    row = db.query_one("SELECT * FROM logs WHERE id=? AND kind='sub'", (log_id,))
+    if not row:
+        return json_err("日志不存在")
+    import os
+    content = ""
+    if row["log_file"] and os.path.isfile(row["log_file"]):
+        try:
+            with open(row["log_file"], "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"日志文件读取失败: {e}"
+    else:
+        content = "日志文件已不存在（可能被清理）"
+    return json_ok({"id": row["id"], "started_at": row["started_at"],
+                    "finished_at": row["finished_at"], "status": row["status"],
+                    "content": content[-20000:]})

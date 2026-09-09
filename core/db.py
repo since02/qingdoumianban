@@ -173,7 +173,7 @@ def _migrate(conn):
             conn.execute("ALTER TABLE dependencies ADD COLUMN log_file TEXT")
         except Exception:
             pass
-    # 订阅表补齐 ql repo 解析字段
+    # 订阅表补齐 ql repo 解析字段 + 最近错误
     cur = conn.execute("PRAGMA table_info(subscriptions)")
     scols = {r[1] for r in cur.fetchall()}
     for col in ("whitelist", "blacklist", "dependence"):
@@ -182,6 +182,11 @@ def _migrate(conn):
                 conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
+    if "last_error" not in scols:
+        try:
+            conn.execute("ALTER TABLE subscriptions ADD COLUMN last_error TEXT DEFAULT ''")
+        except Exception:
+            pass
     # 多用户：users / sessions 表已在 SCHEMA 内（IF NOT EXISTS 自动创建），此处仅做首次种子账号
     try:
         cnt = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]

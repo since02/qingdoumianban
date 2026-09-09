@@ -423,11 +423,48 @@ async function renderSubs() {
       <td class="mono" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(s.url)}">${esc(s.url)}</td>
       <td>${esc(s.branch)}</td><td class="mono">${esc(s.schedule)}</td>
       <td>${s.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
-      <td class="muted nowrap">${esc(s.last_sync || "-")} ${s.last_status ? statusBadge(s.last_status) : ""}</td>
-      <td class="nowrap">${canOp() ? `<button class="sm" onclick="syncSub(${s.id})">同步</button>
+      <td class="muted nowrap">${esc(s.last_sync || "-")} ${s.last_status ? statusBadge(s.last_status) : ""}${s.last_status === "failed" && s.last_error ? ` <span class="badge b-red" style="cursor:help;" title="${esc(s.last_error)}">?</span>` : ""}</td>
+      <td class="nowrap"><button class="sm" onclick="subLogs(${s.id})">日志</button>
+      ${canOp() ? `<button class="sm" onclick="syncSub(${s.id})">同步</button>
       <button class="sm" onclick="subForm(${s.id})">编辑</button>
       <button class="sm danger" onclick="delSub(${s.id})">删</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div>`;
+}
+let subLogList = [];
+async function subLogs(sid) {
+  openModal("订阅同步日志", `<div>
+    <div id="sublog-list" class="muted">加载中…</div>
+    <div id="sublog-view" style="display:none;margin-top:12px;">
+      <div class="toolbar" style="justify-content:space-between;"><b style="font-size:13px;" id="sublog-title">日志内容</b>
+      <button class="sm ghost" onclick="subLogsBack()">← 返回列表</button></div>
+      <pre id="sublog-content" class="mono" style="max-height:380px;overflow:auto;background:var(--bg2,rgba(127,127,127,.08));padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all;font-size:12px;"></pre>
+    </div></div>`,
+    `<button class="ghost" onclick="closeModal()">关闭</button>`);
+  const j = await apiGet(`/subscriptions/${sid}/logs`).catch(() => ({ code: 1 }));
+  const box = $("#sublog-list");
+  if (j.code !== 0) { box.textContent = j.msg || "加载失败"; return; }
+  subLogList = j.data || [];
+  if (!subLogList.length) { box.innerHTML = "暂无同步日志，点「同步」后会记录每次拉取结果。"; return; }
+  box.innerHTML = `<table><thead><tr><th>开始时间</th><th>结束时间</th><th>状态</th><th>操作</th></tr></thead><tbody>
+    ${subLogList.map(l => `<tr><td class="nowrap">${esc(l.started_at || "-")}</td>
+      <td class="nowrap muted">${esc(l.finished_at || "-")}</td>
+      <td>${l.status === "success" ? badge("成功", "b-green") : l.status ? badge("失败", "b-red") : badge("进行中", "b-yellow")}</td>
+      <td><button class="sm" onclick="subLogView(${l.id})">查看</button></td></tr>`).join("")}
+  </tbody></table>`;
+  $("#sublog-view").style.display = "none";
+  window._subLogsSid = sid;
+}
+function subLogsBack() {
+  $("#sublog-view").style.display = "none";
+  $("#sublog-list").style.display = "";
+}
+async function subLogView(logId) {
+  const j = await apiGet(`/subscriptions/logs/${logId}`).catch(() => ({ code: 1 }));
+  if (j.code !== 0) return toast(j.msg || "读取失败", false);
+  $("#sublog-title").textContent = "日志内容（" + (j.data.started_at || "") + "）";
+  $("#sublog-content").textContent = j.data.content || "（空）";
+  $("#sublog-list").style.display = "none";
+  $("#sublog-view").style.display = "";
 }
 function subForm(id) {
   const html = `<label>粘贴青龙 <b>ql repo</b> 命令（自动识别并填充下方字段）</label>
@@ -487,7 +524,11 @@ async function saveSub(id) {
   const j = id ? await apiPut("/subscriptions/" + id, body) : await apiPost("/subscriptions", body);
   if (j.code === 0) { toast("已保存"); closeModal(); renderSubs(); } else toast(j.msg, false);
 }
-async function syncSub(id) { const j = await apiPost("/subscriptions/" + id + "/sync", {}); toast(j.code === 0 ? "已提交同步" : j.msg, j.code === 0); }
+async function syncSub(id) {
+  const j = await apiPost("/subscriptions/" + id + "/sync", {});
+  toast(j.code === 0 ? "已提交同步，正在后台拉取…" : j.msg, j.code === 0);
+  if (j.code === 0) setTimeout(renderSubs, 4000);
+}
 async function delSub(id) { if (!confirm("确认删除该订阅？")) return; const j = await apiDel("/subscriptions/" + id); if (j.code === 0) { toast("已删除"); renderSubs(); } }
 
 /* ---------- 依赖安装 ---------- */
