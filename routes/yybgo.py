@@ -34,8 +34,11 @@ def _yyb_cfg():
     host = config.get_setting("yybgo_host", "127.0.0.1") or "127.0.0.1"
     port = config.get_setting("yybgo_port", "8000") or "8000"
     token = config.get_setting("yybgo_token", "") or ""
+    # 模式：builtin = 内置纯 Python 京东扫码（默认，无需外部程序）；external = 外部 yyb-go
+    mode = (config.get_setting("yybgo_mode", "builtin") or "builtin").strip() or "builtin"
     return {
         "enabled": enabled,
+        "mode": mode if mode in ("builtin", "external") else "builtin",
         "host": host,
         "port": port,
         "url": f"http://{host}:{port}",
@@ -102,6 +105,12 @@ def _hidden_start(cmdline, workdir):
 @auth_required
 def yyb_service_status():
     cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        return json_ok({
+            "builtin": True, "bin": "", "exists": True, "running": True,
+            "pid": None, "port": cfg["port"], "listening": True, "health_ok": True,
+            "console_url": "", "args": "",
+        })
     bin_path = _yyb_bin()
     exists = bool(bin_path) and os.path.isfile(bin_path)
     procs = _yyb_procs(bin_path if exists else None)
@@ -127,6 +136,9 @@ def yyb_service_status():
 @yyb_bp.route("/yybgo/service/start", methods=["POST"])
 @auth_required
 def yyb_service_start():
+    cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        return json_ok(msg="内置模式无需启动外部服务（纯 Python 扫码已在面板内运行）")
     bin_path = _yyb_bin()
     if not bin_path:
         return json_err("请先在下方填写 yyb-go 程序路径（yyb-go.exe 的完整路径）")
@@ -160,6 +172,8 @@ def yyb_service_start():
 @auth_required
 def yyb_service_stop():
     cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        return json_ok(msg="内置模式无需停止（面板停止时自动结束）")
     procs = _yyb_procs(_yyb_bin() or None)
     stopped = []
     for p in procs:
@@ -226,8 +240,10 @@ def _account_label(a):
 
 @yyb_bp.route("/yybgo/status", methods=["GET"])
 def yyb_status():
-    """公开：登录页用来决定是否显示「微信扫码登录」按钮。"""
-    return json_ok({"enabled": _yyb_cfg()["enabled"]})
+    """公开：登录页用来决定是否显示「微信扫码登录」按钮。
+    builtin 模式下该按钮不显示（京东扫码与面板登录无关，仅用于京东Cookie页）。"""
+    cfg = _yyb_cfg()
+    return json_ok({"enabled": bool(cfg["enabled"] and cfg["mode"] == "external")})
 
 
 @yyb_bp.route("/yybgo/config", methods=["GET"])
@@ -236,6 +252,7 @@ def get_yyb_config():
     cfg = _yyb_cfg()
     return json_ok({
         "enabled": cfg["enabled"],
+        "mode": cfg["mode"],
         "host": cfg["host"],
         "port": cfg["port"],
         "has_token": bool(cfg["token"]),
@@ -252,6 +269,8 @@ def save_yyb_config():
     host = (b.get("host") or "127.0.0.1").strip()
     port = str(b.get("port") or "8000").strip()
     token = (b.get("token") or "").strip()
+    mode = "external" if str(b.get("mode") or "").strip() == "external" else "builtin"
+    config.set_setting("yybgo_mode", mode)
     config.set_setting("yybgo_enabled", enabled)
     config.set_setting("yybgo_host", host)
     config.set_setting("yybgo_port", port)
@@ -267,8 +286,23 @@ def save_yyb_config():
 @yyb_bp.route("/yybgo/connection", methods=["GET"])
 @auth_required
 def yyb_connection():
-    """连接状态 + 已登录微信账号列表（供「微信对接」页面展示）。"""
+    """连接状态 + 账号列表（供「微信对接」页面展示）。"""
     cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        from core import db as _db
+        rows = _db.query("SELECT * FROM jdcookie_accounts ORDER BY id DESC")
+        accounts = [{
+            "label": (r["name"] or r["pt_pin"] or r["ref"]),
+            "nickname": r["name"] or "",
+            "openid": r["openid"] or r["ref"],
+            "status": "alive" if r["status"] == "ok" else "dead",
+        } for r in rows]
+        return json_ok({
+            "enabled": True, "mode": "builtin",
+            "host": "", "port": "", "url": "内置京东扫码（无需外部服务）",
+            "connected": True, "error": None,
+            "accounts": accounts, "account_count": len(accounts),
+        })
     if not cfg["enabled"]:
         return json_ok({"enabled": False, "connected": False, "accounts": [],
                         "msg": "未启用 yyb-go 对接"})
@@ -292,6 +326,7 @@ def yyb_connection():
                 account_count = 0
     return json_ok({
         "enabled": True,
+        "mode": "external",
         "host": cfg["host"],
         "port": cfg["port"],
         "url": cfg["url"],
@@ -322,6 +357,15 @@ def yyb_health():
 @yyb_bp.route("/yybgo/qr", methods=["POST"])
 def create_qr():
     cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        # 内置模式：映射为京东扫码（在「京东Cookie」页使用，用于添加京东账号）
+        from core import jdqr
+        try:
+            sid, img = jdqr.create_session()
+        except Exception as e:
+            return json_err("生成二维码失败: " + str(e))
+        return json_ok({"session_id": sid, "image": "data:image/png;base64," + img,
+                        "status": "waiting"})
     if not cfg["enabled"] or not cfg["url"]:
         return json_err("微信扫码登录未启用或未配置 yyb-go")
     r, err = _yyb_call("POST", "/qr?as_base64=true")
@@ -343,6 +387,9 @@ def create_qr():
 @yyb_bp.route("/yybgo/qr/<sid>/poll", methods=["GET"])
 def poll_qr(sid):
     cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        from core import jdqr
+        return json_ok(jdqr.poll_session(sid))
     if not cfg["enabled"] or not cfg["url"]:
         return json_err("微信扫码登录未启用")
     r, err = _yyb_call("GET", "/qr/%s/poll" % sid)
@@ -358,6 +405,25 @@ def poll_qr(sid):
 @yyb_bp.route("/yybgo/qr/<sid>/confirm", methods=["POST"])
 def confirm_qr(sid):
     cfg = _yyb_cfg()
+    if cfg["mode"] == "builtin":
+        # 内置模式：确认 = 京东 ticket 换 Cookie 并写入京东Cookie模块
+        from core import jdqr
+        from routes.jdcookie import _write_env, _store_account
+        try:
+            res = jdqr.confirm_session(sid)
+        except Exception as e:
+            jdqr.drop_session(sid)
+            return json_err(str(e))
+        jdqr.drop_session(sid)
+        cookie = res.get("cookie") or ""
+        pin = res.get("pt_pin") or ""
+        if not cookie:
+            return json_err("未获取到 Cookie")
+        nickname = res.get("nickname") or pin
+        ref = "jd_" + (pin or "jd")
+        _write_env(cookie, pin, nickname or pin)
+        _store_account(ref, nickname or pin or "京东账号", cookie, True, openid=ref)
+        return json_ok({"ready": True, "token": "", "account": {"pt_pin": pin, "nickname": nickname}})
     if not cfg["enabled"] or not cfg["url"]:
         return json_err("微信扫码登录未启用")
     r, err = _yyb_call("POST", "/qr/%s/confirm" % sid)
