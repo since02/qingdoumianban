@@ -1,6 +1,5 @@
 """青豆面板 - 配置 / 设置 / 鉴权 工具。"""
 import os
-import re
 import hmac
 import hashlib
 import secrets
@@ -48,19 +47,6 @@ def ensure_defaults():
     tz = db.query_one("SELECT value FROM settings WHERE key='timezone'")
     if tz is None:
         db.execute("INSERT INTO settings(key,value) VALUES(?,?)", ("timezone", "Asia/Shanghai"))
-    # yyb-go 微信扫码登录对接（默认关闭，本机 127.0.0.1:8000）
-    for k, v in (("yybgo_enabled", "0"), ("yybgo_host", "127.0.0.1"),
-                 ("yybgo_port", "8000"), ("yybgo_token", "")):
-        if db.query_one("SELECT key FROM settings WHERE key=?", (k,)) is None:
-            db.execute("INSERT INTO settings(key,value) VALUES(?,?)", (k, v))
-    # 兼容旧版：若曾配置过 yybgo_url，拆分到 host/port
-    old = db.query_one("SELECT value FROM settings WHERE key='yybgo_url'")
-    if old and old["value"]:
-        m = re.match(r"https?://([^:/]+)(?::(\d+))?", old["value"].rstrip("/"))
-        if m:
-            db.execute("UPDATE settings SET value=? WHERE key='yybgo_host'", (m.group(1),))
-            if m.group(2):
-                db.execute("UPDATE settings SET value=? WHERE key='yybgo_port'", (m.group(2),))
     # GitHub 自动更新（默认关闭，需自行填写仓库地址）
     for k, v in (("github_repo", ""), ("github_branch", "main"), ("github_auto_update", "0")):
         if db.query_one("SELECT key FROM settings WHERE key=?", (k,)) is None:

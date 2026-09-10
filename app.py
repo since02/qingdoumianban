@@ -117,13 +117,11 @@ def _register_routes():
     import routes.system
     import routes.ai
     import routes.compat
-    import routes.yybgo
     import routes.users
     import routes.files
     import routes.jdcookie
     from routes import bp
     app.register_blueprint(bp)
-    app.register_blueprint(routes.yybgo.yyb_bp)
 
 
 def bootstrap():

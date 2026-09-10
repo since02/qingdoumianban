@@ -3,8 +3,6 @@ const API_BASE = "";
 let TOKEN = localStorage.getItem("qd_token") || "";
 let ROLE = localStorage.getItem("qd_role") || "";
 let CURRENT = "dashboard";
-let wxTimer = null;
-let yybTimer = null;
 let metricsTimer = null;
 let filesTimer = null;
 
@@ -33,7 +31,6 @@ const NAV = [
   { id: "ai", icon: "🤖", label: "AI 对接" },
   { id: "files", icon: "🗂️", label: "文件管理" },
   { id: "monitor", icon: "📈", label: "系统监控" },
-  { id: "yybgo", icon: "💬", label: "微信对接" },
   { id: "jdcookie", icon: "🛒", label: "京东Cookie" },
   { id: "users", icon: "👥", label: "用户管理", adminOnly: true },
   { id: "system", icon: "⚙️", label: "系统设置" },
@@ -107,7 +104,6 @@ function showLogin() {
   $("#login").style.display = "flex";
   const tbtn = $("#theme-toggle-login");
   if (tbtn) tbtn.style.display = "inline-block";
-  refreshLoginOptions();
 }
 function hideLogin() {
   $("#login").style.display = "none";
@@ -162,53 +158,6 @@ function toggleTheme() {
   applyTheme(cur === "dark" ? "light" : "dark");
 }
 
-/* ---------- 微信扫码登录（yyb-go 对接） ---------- */
-async function refreshLoginOptions() {
-  const j = await apiGet("/yybgo/status").catch(() => ({ code: 1 }));
-  if (j.code === 0 && j.data && j.data.enabled) {
-    const b = $("#btn-wx");
-    if (b) b.style.display = "block";
-  }
-}
-function showWxLogin() {
-  openModal("微信扫码登录",
-    `<div style="text-align:center;">
-       <div id="wxqr" style="display:inline-block;padding:10px;background:#fff;border-radius:8px;min-width:220px;min-height:220px;line-height:220px;color:#888;">正在生成…</div>
-       <p class="muted" id="wxstatus">请使用微信/应用宝扫码并在手机上确认</p>
-       <div class="toolbar" style="justify-content:center;"><button class="ghost sm" onclick="startWx()">刷新二维码</button><button class="ghost sm" onclick="closeModal()">取消</button></div>
-     </div>`);
-  startWx();
-}
-async function startWx() {
-  if (wxTimer) { clearTimeout(wxTimer); wxTimer = null; }
-  const j = await apiPost("/yybgo/qr", {}).catch(() => ({ code: 1, msg: "请求失败" }));
-  if (j.code !== 0) { const e = $("#wxqr"); if (e) e.innerHTML = '<span style="color:#c33;line-height:normal;">生成失败：' + esc(j.msg) + '</span>'; return; }
-  $("#wxqr").innerHTML = '<img src="' + j.data.image + '" style="width:200px;height:200px;display:block;">';
-  pollWx(j.data.session_id);
-}
-async function pollWx(sid) {
-  const j = await apiGet("/yybgo/qr/" + sid + "/poll").catch(() => ({ code: 1 }));
-  if (j.code !== 0) { $("#wxstatus").textContent = "轮询失败，请刷新"; return; }
-  const d = j.data || {};
-  if (d.expired) { $("#wxstatus").textContent = "二维码已过期，请点击刷新"; return; }
-  $("#wxstatus").textContent = "状态：" + (d.status || "等待扫码") + "（请在手机上确认）";
-  if (d.ready) { confirmWx(sid); return; }
-  wxTimer = setTimeout(() => pollWx(sid), 1500);
-}
-async function confirmWx(sid) {
-  const j = await apiPost("/yybgo/qr/" + sid + "/confirm", {}).catch(() => ({ code: 1, msg: "确认失败" }));
-  if (j.code !== 0) { $("#wxstatus").textContent = "确认失败：" + (j.msg || ""); return; }
-  if (j.data && j.data.ready && j.data.token) {
-    TOKEN = j.data.token;
-    localStorage.setItem("qd_token", TOKEN);
-    closeModal();
-    bootApp();
-  } else {
-    $("#wxstatus").textContent = "登录缓冲未就绪，继续等待…";
-    wxTimer = setTimeout(() => pollWx(sid), 1500);
-  }
-}
-
 /* ---------- 导航 ---------- */
 function renderNav() {
   const items = NAV.filter(n => !n.adminOnly || canAdmin());
@@ -218,8 +167,6 @@ function renderNav() {
 }
 function navigate(view) {
   CURRENT = view;
-  if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
-  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
   if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
   if (filesTimer) { clearInterval(filesTimer); filesTimer = null; }
   $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
@@ -227,7 +174,7 @@ function navigate(view) {
     dashboard: renderDashboard, tasks: renderTasks, scripts: renderScripts,
     subs: renderSubs, deps: renderDeps, envs: renderEnvs, notifs: renderNotifs,
     ai: renderAI, files: renderFiles, monitor: renderMonitor, users: renderUsers,
-    yybgo: renderYybgo, jdcookie: renderJdCookie, system: renderSystem,
+    jdcookie: renderJdCookie, system: renderSystem,
   };
   (map[view] || renderDashboard)();
 }
@@ -913,210 +860,9 @@ function waitUntilDead(cb) {
   }, 1000);
 }
 
-/* ---------- 微信对接（yyb-go，独立页面） ---------- */
-async function renderYybgo() {
-  if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
-  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
-  $("#main").innerHTML = `<div class="page-head"><div><h2>微信对接</h2><div class="sub">内置京东扫码（纯 Python，推荐）或外部 yyb-go 微信扫码，双模式可切换</div></div>
-    <div class="toolbar"><button class="ghost" onclick="loadYybgo()">刷新</button>
-    <button class="primary" onclick="yybAddAccount()">＋ 扫码添加账号</button></div></div>
-    <div class="grid" style="grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
-      <div class="card"><div class="page-head"><h2 style="font-size:15px;">对接模式</h2></div>
-        <label>登录源</label><select id="yyb_mode" onchange="yybModeChanged()"><option value="builtin">内置京东扫码（推荐，纯 Python 无需外部程序）</option><option value="external">外部 yyb-go（微信扫码，需本机 yyb-go.exe）</option></select>
-        <div id="yyb-svc-ext">
-          <div class="page-head" style="margin-top:14px;"><h2 style="font-size:15px;">服务管理</h2>
-            <div class="toolbar" id="yyb-svc-btns"></div></div>
-          <div id="yyb-svc" class="muted">检测中…</div>
-          <div class="row2" style="margin-top:10px;"><div><label>yyb-go 程序路径（exe 完整路径，用于本机一键启动）</label><input id="yyb_bin" placeholder="例如 D:\\tools\\yyb-go\\yyb-go.exe"></div>
-          <div><label>启动参数（可选，如监听地址/端口）</label><input id="yyb_args" placeholder="例如 -addr 127.0.0.1:8899"></div></div>
-        </div>
-        <p class="muted" id="yyb-svc-builtin" style="font-size:12px;display:none;">内置模式在面板进程内直接运行，无需启动任何外部服务。扫码入口在「京东Cookie」页（手机京东 App 扫码自动获取 Cookie）。</p>
-      </div>
-      <div class="card"><div class="page-head"><h2 style="font-size:15px;">服务配置</h2></div>
-        <label class="flex" style="gap:8px;font-size:13px;align-items:center;"><input type="checkbox" id="yyb_enabled" style="width:auto;"> 启用微信扫码登录面板（仅外部 yyb-go 模式有效）</label>
-        <div class="row2"><div><label>服务地址（本机 IP，默认 127.0.0.1）</label><input id="yyb_host" value="127.0.0.1"></div>
-        <div><label>端口（默认 8000，可自定义）</label><input id="yyb_port" value="8000"></div></div>
-        <label>yyb-go API Token（YYB_API_TOKEN，留空则不修改）</label><input id="yyb_token" placeholder="留空表示不修改">
-        <div class="toolbar"><button class="primary" onclick="saveYybConfig()">保存配置</button>
-        <button onclick="testYyb()">测试连接</button>
-        <a id="yyb_console" class="ghost" style="text-decoration:none;display:none;padding:7px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px;" target="_blank" href="#">打开 yyb-go 控制台 ↗</a></div>
-        <p class="muted" id="yyb_msg" style="font-size:12px;">外部模式启用后，登录页将出现「微信扫码登录」按钮。</p>
-      </div>
-    </div>
-    <div class="card"><div class="page-head"><h2 style="font-size:15px;">已登录账号</h2>
-      <div class="toolbar"><button class="ghost" onclick="loadYybConn()">刷新列表</button></div></div>
-      <div id="yyb-accounts" class="muted">加载中…</div>
-    </div>`;
-  loadYybgo();
-  loadYybService();
-  yybTimer = setInterval(() => { if (CURRENT === "yybgo") { loadYybConn(); loadYybService(); } }, 8000);
-}
-function yybModeChanged() {
-  const ext = $("#yyb_mode").value === "external";
-  $("#yyb-svc-ext").style.display = ext ? "" : "none";
-  $("#yyb-svc-builtin").style.display = ext ? "none" : "";
-}
-async function loadYybService() {
-  const j = await apiGet("/yybgo/service").catch(() => null);
-  const box = $("#yyb-svc"), btns = $("#yyb-svc-btns"), cons = $("#yyb_console");
-  if (!box) return;
-  if (!j || j.code !== 0) { box.innerHTML = `<span class="badge b-red">状态获取失败</span>`; return; }
-  const d = j.data;
-  if (d.builtin) {
-    box.innerHTML = `<span class="dot green"></span><b>内置模式运行中</b> · 纯 Python，无需外部程序`;
-    if (btns) btns.innerHTML = "";
-    if (cons) cons.style.display = "none";
-    return;
-  }
-  $("#yyb_bin").value = d.bin || "";
-  $("#yyb_args").value = d.args || "";
-  if (cons) { cons.href = d.console_url || "#"; cons.style.display = d.running ? "inline-block" : "none"; }
-  let st;
-  if (!d.bin) st = `<span class="badge b-gray">未配置程序路径</span> <span class="muted">在下方填写 yyb-go.exe 路径后可一键启动</span>`;
-  else if (!d.exists) st = `<span class="badge b-red">程序不存在</span> <span class="mono">${esc(d.bin)}</span>`;
-  else if (d.health_ok) st = `<span class="dot green"></span><b>运行中</b> · 端口 ${esc(d.port)} · <a href="${esc(d.console_url)}" target="_blank">${esc(d.console_url)}</a>${d.pid ? " · PID " + d.pid : ""}`;
-  else if (d.listening) st = `<span class="dot green"></span><b>端口已监听</b>（health 未响应）· 端口 ${esc(d.port)}`;
-  else if (d.running) st = `<span class="dot yellow"></span><b>进程在运行</b>但端口 ${esc(d.port)} 未监听（可能启动参数与端口配置不一致）`;
-  else st = `<span class="dot gray"></span><b>已停止</b>`;
-  box.innerHTML = st;
-  if (btns) {
-    const canStart = d.bin && d.exists;
-    btns.innerHTML = `
-      <button class="primary sm" ${canStart && !d.running ? "" : "disabled"} onclick="yybSvcStart()">▶ 启动服务</button>
-      <button class="sm" ${d.running ? "" : "disabled"} onclick="yybSvcStop()">⏹ 停止服务</button>`;
-  }
-}
-async function yybSvcStart() {
-  if ($("#yyb_mode") && $("#yyb_mode").value !== "external") { toast("内置模式无需启动服务", true); return; }
-  if (!$("#yyb_bin") || !confirmSaveYybBin()) return;
-  toast("正在启动 yyb-go…");
-  const j = await apiPost("/yybgo/service/start", {}).catch(() => ({ code: 1, msg: "请求失败" }));
-  toast(j.msg || (j.code === 0 ? "已启动" : "启动失败"), j.code === 0);
-  loadYybService(); loadYybConn();
-}
-async function yybSvcStop() {
-  const j = await apiPost("/yybgo/service/stop", {}).catch(() => ({ code: 1, msg: "请求失败" }));
-  toast(j.msg || (j.code === 0 ? "已停止" : "停止失败"), j.code === 0);
-  loadYybService(); loadYybConn();
-}
-function confirmSaveYybBin() {
-  const bin = $("#yyb_bin").value.trim();
-  if (!bin) { toast("请先填写 yyb-go 程序路径", false); return false; }
-  return true;
-}
-let yybQrTimer = null;
-async function yybAddAccount() {
-  const isBuiltin = $("#yyb_mode") && $("#yyb_mode").value === "builtin";
-  if (isBuiltin) {
-    toast("内置模式请到「京东Cookie」页扫码添加京东账号", false);
-    return;
-  }
-  openModal("扫码添加微信账号", `<div style="text-align:center;">
-      <div id="yyb-qr-status" class="muted" style="margin-bottom:10px;">正在生成二维码…</div>
-      <div id="yyb-qr-img" style="min-height:220px;display:flex;align-items:center;justify-content:center;"></div>
-      <p class="muted" style="font-size:12px;margin-top:10px;">请使用微信扫码并在手机上确认授权；成功后账号会出现在下方列表。</p>
-    </div>`,
-    `<button class="ghost" onclick="closeModal()">关闭</button>`);
-  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
-  const j = await apiPost("/yybgo/qr", {}).catch(() => ({ code: 1, msg: "请求失败" }));
-  if (j.code !== 0) { $("#yyb-qr-status").textContent = "❌ " + (j.msg || "生成失败（请确认 yyb-go 已启动且已配置 Token）"); return; }
-  $("#yyb-qr-img").innerHTML = `<img src="${j.data.image}" style="width:220px;height:220px;border-radius:8px;" alt="二维码">`;
-  $("#yyb-qr-status").textContent = "等待扫码…";
-  const sid = j.data.session_id;
-  let done = false;
-  yybQrTimer = setInterval(async () => {
-    if (done || CURRENT !== "yybgo") { clearInterval(yybQrTimer); yybQrTimer = null; return; }
-    const p = await apiGet(`/yybgo/qr/${sid}/poll`).catch(() => null);
-    if (!p || p.code !== 0) return;
-    if (p.data.ready) {
-      done = true; clearInterval(yybQrTimer); yybQrTimer = null;
-      $("#yyb-qr-status").innerHTML = `<span class="badge b-green">扫码成功</span> 正在确认…`;
-      const c = await apiPost(`/yybgo/qr/${sid}/confirm`, {}).catch(() => ({ code: 1 }));
-      $("#yyb-qr-status").innerHTML = c.code === 0
-        ? `<span class="badge b-green">添加成功 ✅</span> <span class="muted">可关闭本窗口</span>`
-        : `<span class="badge b-yellow">已扫码</span> ${esc(c.msg || "确认接口未就绪，稍后刷新列表查看")}`;
-      loadYybConn();
-    } else if (p.data.expired) {
-      done = true; clearInterval(yybQrTimer); yybQrTimer = null;
-      $("#yyb-qr-status").innerHTML = `<span class="badge b-red">二维码已过期</span> <button class="sm" onclick="yybAddAccount()">重新生成</button>`;
-    } else if (p.data.status) {
-      $("#yyb-qr-status").textContent = "状态: " + p.data.status;
-    }
-  }, 2500);
-}
-async function loadYybgo() {
-  const c = await apiGet("/yybgo/config").catch(() => ({ code: 1 }));
-  if (c.code === 0 && c.data) {
-    if ($("#yyb_mode")) $("#yyb_mode").value = c.data.mode || "builtin";
-    yybModeChanged();
-    $("#yyb_enabled").checked = !!c.data.enabled;
-    $("#yyb_host").value = c.data.host || "127.0.0.1";
-    $("#yyb_port").value = c.data.port || "8000";
-    if ($("#yyb_bin")) $("#yyb_bin").value = c.data.bin || "";
-    if ($("#yyb_args")) $("#yyb_args").value = c.data.args || "";
-  }
-  loadYybConn();
-}
-async function loadYybConn() {
-  const j = await apiGet("/yybgo/connection").catch(() => ({ code: 1, msg: "请求失败" }));
-  const conn = $("#yyb-conn");
-  let builtin = false;
-  if (j.code !== 0) { if (conn) conn.innerHTML = `<span class="badge b-red">检测失败</span> ${esc(j.msg || "")}`; }
-  else {
-    const d = j.data || {};
-    builtin = d.mode === "builtin";
-    if (!conn) { /* noop */ }
-    else if (builtin) conn.innerHTML = `<span class="dot green"></span><b>内置扫码模式</b> · 京东账号直接在「京东Cookie」页扫码添加`;
-    else if (!d.enabled) conn.innerHTML = `<span class="dot gray"></span><b>未启用</b> · 请在右侧开启并保存`;
-    else if (d.connected) conn.innerHTML = `<span class="dot green"></span><b>已连接</b> · ${esc(d.url)}`;
-    else conn.innerHTML = `<span class="dot red"></span><b>未连接</b> · ${esc(d.url)} ${d.error ? "（" + esc(d.error) + "）" : ""}`;
-  }
-  const box = $("#yyb-accounts");
-  if (!box) return;
-  const accs = (j.data && j.data.accounts) || [];
-  if (builtin) {
-    if (!accs.length) { box.innerHTML = `<span class="muted">暂无京东账号。请到「京东Cookie」页点「＋ 扫码登录京东」添加。</span>`; return; }
-    box.innerHTML = `<table><thead><tr><th>京东账号</th><th>状态</th><th>pt_pin</th></tr></thead><tbody>
-      ${accs.map(a => `<tr><td><b>${esc(a.label || a.nickname || "未知")}</b></td>
-        <td>${badge(a.status === "alive" ? "正常" : "失效", a.status === "alive" ? "b-green" : "b-red")}</td>
-        <td class="mono nowrap">${esc(a.openid || "")}</td></tr>`).join("")}
-    </tbody></table>`;
-    return;
-  }
-  if (!j.data || !j.data.connected) { box.innerHTML = `<span class="muted">未连接到 yyb-go，无法获取账号列表。</span>`; return; }
-  if (!accs.length) { box.innerHTML = `<span class="muted">暂无已登录的微信账号。请在 yyb-go 中扫码登录后刷新。</span>`; return; }
-  box.innerHTML = `<table><thead><tr><th>账号</th><th>状态</th><th>OpenID</th></tr></thead><tbody>
-    ${accs.map(a => `<tr><td><b>${esc(a.label || a.nickname || "未知")}</b></td>
-      <td>${a.status ? badge(a.status, a.status === "alive" ? "b-green" : "b-gray") : badge("未知", "b-gray")}</td>
-      <td class="mono nowrap">${esc((a.openid || "").slice(0, 14) + ((a.openid || "").length > 14 ? "…" : ""))}</td></tr>`).join("")}
-  </tbody></table>`;
-}
-async function saveYybConfig() {
-  const j = await apiPost("/yybgo/config", {
-    mode: $("#yyb_mode") ? $("#yyb_mode").value : "builtin",
-    enabled: $("#yyb_enabled").checked,
-    host: $("#yyb_host").value.trim() || "127.0.0.1",
-    port: $("#yyb_port").value.trim() || "8000",
-    token: $("#yyb_token").value,
-    bin: $("#yyb_bin") ? $("#yyb_bin").value.trim() : "",
-    args: $("#yyb_args") ? $("#yyb_args").value.trim() : "",
-  }).catch(() => ({ code: 1, msg: "保存失败" }));
-  toast(j.code === 0 ? "yyb-go 配置已保存" : (j.msg || "保存失败"), j.code === 0);
-  if (j.code === 0) { $("#yyb_token").value = ""; loadYybgo(); loadYybService(); }
-}
-async function testYyb() {
-  const j = await apiGet("/yybgo/health").catch(() => ({ code: 1, msg: "测试失败" }));
-  const m = $("#yyb_msg");
-  if (j.code === 0 && j.data) {
-    if (m) m.textContent = j.data.ok ? "✅ 连接正常（HTTP " + j.data.status + "）" : ("❌ " + (j.data.msg || ("HTTP " + j.data.status)));
-  } else if (m) m.textContent = (j.msg || "测试失败");
-  loadYybConn();
-}
 
-/* ---------- 京东 Cookie（内置扫码 / yyb-go 双模式） ---------- */
+/* ---------- 京东 Cookie（内置扫码，纯 Python） ---------- */
 async function renderJdCookie() {
-  if (yybTimer) { clearInterval(yybTimer); yybTimer = null; }
-  if (yybQrTimer) { clearInterval(yybQrTimer); yybQrTimer = null; }
   if (window.jdTimer) { clearInterval(window.jdTimer); window.jdTimer = null; }
   $("#main").innerHTML = `<div class="page-head"><div><h2>京东 Cookie</h2><div class="sub">内置京东扫码登录（纯 Python，无需外部程序），自动获取 pt_key/pt_pin 写入环境变量供青龙脚本使用</div></div>
     <div class="toolbar"><button class="primary" onclick="jdQrAdd()">＋ 扫码登录京东</button>
@@ -1126,15 +872,14 @@ async function renderJdCookie() {
         <div id="jd-conn" class="muted">检测中…</div>
       </div>
       <div class="card"><div class="page-head"><h2 style="font-size:15px;">京东 Cookie 设置</h2></div>
-        <label>登录源</label><select id="jd_login_source"><option value="builtin">内置扫码（推荐，纯 Python 无需外部程序）</option><option value="yybgo">外部 yyb-go（微信登录态驱动）</option></select>
         <label>环境变量名（脚本读取的键，默认 JD_COOKIE）</label><input id="jd_env_name" value="JD_COOKIE">
         <div class="row2"><div><label>Cookie 模式</label><select id="jd_cookie_mode"><option value="pt">pt（仅 pt_key/pt_pin）</option><option value="all">all（全部 Cookie）</option></select></div>
-        <div><label>登录模式（仅 yyb-go 模式）</label><select id="jd_login_mode"><option value="auto">auto</option><option value="code">code</option><option value="full">full</option></select></div></div>
+        <div><label>登录模式</label><select id="jd_login_mode"><option value="auto">auto</option><option value="code">code</option><option value="full">full</option></select></div></div>
         <div class="row2"><div><label>自动检查 cron</label><input id="jd_cron" value="0 */2 * * *" class="mono"></div>
         <div><label class="flex" style="gap:8px;align-items:center;font-size:13px;margin-top:18px;"><input type="checkbox" id="jd_auto" style="width:auto;"> 启用自动检查</label></div></div>
         <div class="toolbar"><button class="primary" onclick="saveJdConfig()">保存设置</button>
         <button onclick="jdRefreshAll()">🔄 校验/刷新全部</button></div>
-        <p class="muted" style="font-size:12px;">内置模式：手机京东 App 扫码 → 自动写入 Cookie；失效后需重新扫码（京东 Cookie 约 30 天有效）。yyb-go 模式：微信小程序 code 静默续期。</p>
+        <p class="muted" style="font-size:12px;">手机京东 App 扫码 → 自动写入 Cookie；失效后需重新扫码（京东 Cookie 约 30 天有效）。</p>
       </div>
     </div>
     <div class="card" id="jd-acc-card"><div class="page-head"><h2 style="font-size:15px;" id="jd-acc-title">京东账号</h2>
@@ -1151,7 +896,6 @@ async function renderJdCookie() {
 async function loadJdConfig() {
   const c = await apiGet("/jdcookie/config").catch(() => ({ code: 1 }));
   if (c.code === 0 && c.data) {
-    $("#jd_login_source").value = c.data.login_source || "builtin";
     $("#jd_env_name").value = c.data.cookie_env_name || "JD_COOKIE";
     $("#jd_cookie_mode").value = c.data.cookie_mode || "pt";
     $("#jd_login_mode").value = c.data.login_mode || "auto";
@@ -1161,7 +905,6 @@ async function loadJdConfig() {
 }
 async function saveJdConfig() {
   const j = await apiPost("/jdcookie/config", {
-    login_source: $("#jd_login_source").value,
     cookie_env_name: $("#jd_env_name").value.trim() || "JD_COOKIE",
     cookie_mode: $("#jd_cookie_mode").value,
     login_mode: $("#jd_login_mode").value,
@@ -1174,28 +917,21 @@ async function saveJdConfig() {
 async function loadJdAccounts() {
   const cj = await apiGet("/jdcookie/connection").catch(() => ({ code: 1, msg: "请求失败" }));
   const conn = $("#jd-conn");
-  let builtin = true;
   if (conn) {
     if (cj.code !== 0) conn.innerHTML = `<span class="badge b-red">检测失败</span> ${esc(cj.msg || "")}`;
-    else {
-      const d = cj.data || {};
-      builtin = d.mode !== "external";
-      if (builtin) conn.innerHTML = `<span class="dot green"></span><b>内置扫码模式</b> · 纯 Python 京东扫码，无需外部服务`;
-      else if (!d.enabled) conn.innerHTML = `<span class="dot gray"></span><b>未启用</b> · 请先在「微信对接」开启 yyb-go`;
-      else if (d.connected) conn.innerHTML = `<span class="dot green"></span><b>已连接</b> · ${esc(d.url)}`;
-      else conn.innerHTML = `<span class="dot red"></span><b>未连接</b> · ${esc(d.url)} ${d.error ? "（" + esc(d.error) + "）" : ""}`;
-    }
+    else conn.innerHTML = `<span class="dot green"></span><b>内置扫码模式</b> · 纯 Python 京东扫码，无需外部服务`;
   }
   const accBox = $("#jd-accounts"), accTitle = $("#jd-acc-title");
   const accs = (cj.data && cj.data.accounts) || [];
-  if (accBox && !builtin) {
-    if (accTitle) accTitle.textContent = "微信账号（点击获取京东 Cookie）";
-    if (!cj.data || !cj.data.connected) accBox.innerHTML = `<span class="muted">未连接到 yyb-go，无法获取微信账号。</span>`;
-    else if (!accs.length) accBox.innerHTML = `<span class="muted">暂无已登录微信账号，请在 yyb-go 中扫码登录后刷新。</span>`;
-    else accBox.innerHTML = `<table><thead><tr><th>微信账号</th><th>状态</th><th>操作</th></tr></thead><tbody>
-      ${accs.map(a => { const ref = a.openid || a.uin || a.id || ""; const label = a.label || a.nickname || "未知";
-        return `<tr><td><b>${esc(label)}</b></td><td>${a.status ? badge(a.status, a.status === "alive" ? "b-green" : "b-gray") : badge("未知", "b-gray")}</td>
-        <td><button class="sm" data-ref="${esc(ref)}" data-name="${esc(label)}" onclick="jdRefresh(this.dataset.ref, this.dataset.name)">获取 Cookie</button></td></tr>`; }).join("")}
+  if (accBox) {
+    if (accTitle) accTitle.textContent = "已登录京东账号";
+    if (!accs.length) accBox.innerHTML = `<span class="muted">暂无已登录京东账号，请点「＋ 扫码登录京东」。</span>`;
+    else accBox.innerHTML = `<table><thead><tr><th>账号</th><th>京东账号(pt_pin)</th><th>状态</th><th>操作</th></tr></thead><tbody>
+      ${accs.map(a => { const ref = a.ref || a.openid || a.uin || a.id || ""; const label = a.label || a.nickname || a.name || "未知";
+        return `<tr><td><b>${esc(label)}</b></td><td class="mono nowrap">${esc(a.pt_pin || "—")}</td>
+        <td>${a.status === "alive" || a.status === "ok" ? badge("正常", "b-green") : badge("失效", "b-red")}</td>
+        <td><button class="sm" data-ref="${esc(ref)}" onclick="jdCheck(this.dataset.ref)">校验</button>
+        <button class="sm danger" data-ref="${esc(ref)}" onclick="jdDeleteAccount(this.dataset.ref)">删</button></td></tr>`; }).join("")}
     </tbody></table>`;
   }
   const ck = await apiGet("/jdcookie/accounts").catch(() => ({ code: 1, data: [] }));
