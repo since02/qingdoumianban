@@ -373,7 +373,7 @@ async function viewLog(lid) {
 
 /* ---------- 脚本管理 ---------- */
 async function renderScripts() {
-  $("#main").innerHTML = `<div class="page-head"><div><h2>脚本管理</h2><div class="sub">位于 data/scripts 目录，可直接创建 / 编辑 / 运行</div></div>
+  $("#main").innerHTML = `<div class="page-head"><div><h2>脚本管理</h2><div class="sub">data/scripts 自建脚本 + data/subs 订阅拉取的脚本（subs/ 前缀），可直接编辑 / 运行</div></div>
     <div class="toolbar"><button class="ghost" onclick="renderScripts()">刷新</button>
     ${canOp() ? `<button class="primary" onclick="scriptForm()">+ 新建脚本</button>` : ""}</div></div>
     <div id="script-list">加载中…</div>`;

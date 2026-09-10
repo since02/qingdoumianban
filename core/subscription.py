@@ -185,6 +185,57 @@ def _cmd_for_ext(fpath, ext):
     return f'python "{rel}"'
 
 
+NAME_ENV_RE = re.compile(r"new\s+Env\s*\(\s*['\"]([^'\"]{2,40})['\"]\s*\)")
+NAME_CMT_RE = re.compile(r"(?<![A-Za-z_])(?:name|脚本名称|活动名称|应用名称|任务名称)\s*[:：=]\s*(\S.{1,40})")
+
+
+def _name_candidate_lines(head):
+    """收集可参与名称匹配的行：显式注释行（# // * /*）+ Python docstring 内部裸行。"""
+    out = []
+    in_doc = False
+    for line in head.splitlines():
+        s = line.strip().lstrip("\ufeff")
+        if not s:
+            continue
+        if in_doc:
+            end = '"""' if '"""' in s else ("'''" if "'''" in s else "")
+            body = s.split(end, 1)[0] if end else s
+            if body.strip():
+                out.append(body.strip())
+            if end:
+                in_doc = False
+            continue
+        if s.startswith(('"""', "'''")):
+            # 单行 docstring："""xxx""" 整体算一条
+            body = s[3:]
+            end = '"""' if '"""' in body else ("'''" if "'''" in body else "")
+            if end:
+                body = body.split(end, 1)[0]
+            else:
+                in_doc = True
+            if body.strip():
+                out.append(body.strip())
+            continue
+        if s.startswith(("#", "//", "/*", "*")):
+            out.append(s.lstrip("#/* \t-"))
+    return out
+
+
+def _detect_name(head, fn):
+    """从脚本头部提取可读名称：name: 注释/docstring > new Env('xxx') > 文件名。
+    只在注释与 docstring 行匹配，避免命中混淆代码里的对象属性（如 {name:t,...}）和 filename=。"""
+    for line in _name_candidate_lines(head):
+        m = NAME_CMT_RE.search(line)
+        if m:
+            name = m.group(1).strip().strip("\"'，,。;")
+            if name and not re.match(r"^[0-9*/ .-]+$", name):
+                return name
+    m = NAME_ENV_RE.search(head)
+    if m:
+        return m.group(1).strip()
+    return os.path.splitext(fn)[0]
+
+
 def _import_crons(target, sub):
     """扫描仓库文件并按 cron 注释导入任务，返回导入（命中）文件数。"""
     white = _split_patterns(sub.get("whitelist"))
@@ -208,13 +259,14 @@ def _import_crons(target, sub):
                 continue
             try:
                 with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                    head = "".join(f.readlines()[:30])
+                    # 前 120 行：覆盖块注释里的 name/说明，以及 new Env(...) 所在行
+                    head = "".join(f.readlines()[:120])
             except Exception:
                 continue
             schedule = _detect_cron(head)
             if not schedule:
                 continue
-            name = os.path.splitext(fn)[0]
+            name = _detect_name(head, fn)
             ext = os.path.splitext(fn)[1]
             _find_or_create_task(sub["id"], f"{sub['alias'] or sub['id']}/{rel}",
                                  name, _cmd_for_ext(fpath, ext), schedule)

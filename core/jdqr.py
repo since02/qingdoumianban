@@ -123,25 +123,41 @@ class JdQrSession:
             return self._result()
         if self.status != "confirmed" or not self.ticket:
             raise RuntimeError("用户尚未在手机上确认（当前状态: %s）" % self.status)
-        self.s.headers.update({
-            "User-Agent": UA_M,
-            "Referer": "https://plogin.m.jd.com/login/login?appid=%s&returnurl=https%%3A%%2F%%2Fwww.jd.com%%2F" % QR_APPID,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        })
-        url = "https://pt.m.jd.com/user/login?" + urllib.parse.urlencode({
-            "ticket": self.ticket, "appid": QR_APPID, "returnurl": "https://www.jd.com/",
-        })
-        self.s.get(url, timeout=30, allow_redirects=True)
-        cookie = self._extract_pt()
-        if not cookie:
-            raise RuntimeError("登录成功但未从会话中解析到 pt_key/pt_pin")
-        self.cookie = cookie
-        self.pt_pin = _pin_of(cookie)
-        self.status = "success"
-        # 顺手取昵称（失败不影响）
-        ok, nick = verify_cookie(cookie)
-        self.nickname = nick or ""
-        return self._result()
+        ticket = self.ticket
+        ret_pc = urllib.parse.quote("https://www.jd.com/", safe="")
+        # 多端点依次尝试：PC passport 优先（appid=133 的 ticket 由 PC 扫码页签发）
+        attempts = [
+            ("https://passport.jd.com/uc/login?ticket=%s&ReturnUrl=%s" % (ticket, ret_pc),
+             UA_PC, "https://passport.jd.com/new/login.aspx"),
+            ("https://pt.m.jd.com/user/login?%s" % urllib.parse.urlencode(
+                {"ticket": ticket, "appid": QR_APPID, "returnurl": "https://www.jd.com/"}),
+             UA_M, "https://plogin.m.jd.com/login/login?appid=%s" % QR_APPID),
+            ("https://plogin.m.jd.com/user/login?%s" % urllib.parse.urlencode(
+                {"ticket": ticket, "appid": QR_APPID, "returnurl": "https://www.jd.com/"}),
+             UA_M, "https://plogin.m.jd.com/login/login?appid=%s" % QR_APPID),
+        ]
+        diag = []
+        for url, ua, ref in attempts:
+            try:
+                self.s.headers.update({
+                    "User-Agent": ua, "Referer": ref,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                })
+                r = self.s.get(url, timeout=30, allow_redirects=True)
+                cookie = self._extract_pt()
+                diag.append("%s -> %s" % (urllib.parse.urlsplit(url).netloc,
+                                          "OK" if cookie else "no-pt"))
+                if cookie:
+                    self.cookie = cookie
+                    self.pt_pin = _pin_of(cookie)
+                    self.status = "success"
+                    ok, nick = verify_cookie(cookie)
+                    self.nickname = nick or ""
+                    return self._result()
+            except Exception as e:
+                diag.append("%s -> %s" % (urllib.parse.urlsplit(url).netloc,
+                                          type(e).__name__))
+        raise RuntimeError("登录成功但未从会话中解析到 pt_key/pt_pin [%s]" % "; ".join(diag))
 
     def _extract_pt(self):
         try:

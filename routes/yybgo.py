@@ -2,10 +2,17 @@
 
 对接方式：本面板将 yyb-go 作为「微信/应用宝扫码登录」的凭证后端。
 登录流程：
-  1) 前端调用 POST /api/yybgo/qr  -> 面板用 Bearer Token 请求 yyb-go 生成二维码
+  1) 前端调用 POST /api/yybgo/qr  -> 面板请求 yyb-go 生成二维码（返回 base64 图片）
   2) 前端轮询 GET /api/yybgo/qr/<id>/poll
   3) 用户手机确认后，前端调用 POST /api/yybgo/qr/<id>/confirm
      -> 面板向 yyb-go 确认并取得微信账号，验证通过后下发本面板自己的 API Token
+
+认证说明（关键）：
+  yyb-go 的 /qr、/accounts 落在 requireBrowserSession() 中间件之后，需要浏览器会话
+  cookie（yyb_session）；Bearer Token 仅用于 /integration/* 接口。本面板作为「浏览器替身」：
+  内置分发的 yyb-go 启动时加 YYB_AUTH_DRIVER=none（本地 127.0.0.1 免认证，面板已用 api_token
+  保护），故 /qr 可直接调用；若指向用户自带且启用认证的外置 yyb-go，面板会先用配置的
+  yybgo_user/yybgo_pass 登录 /login 取得 cookie 并缓存复用（见 _yyb_call 自适应逻辑）。
 
 本模块同时提供「连接状态 + 已登录微信账号」查询，供独立「微信对接」页面展示。
 注意：登录相关接口为公开接口（login 阶段使用）；配置/连接/账号查询接口需鉴权。
@@ -13,6 +20,7 @@
 import os
 import re
 import time
+import threading
 import subprocess
 
 import requests
@@ -27,6 +35,51 @@ yyb_bp = Blueprint("yybgo", __name__, url_prefix="/api")
 YYB_TERMINAL = {"expired", "cancelled", "unknown", "timeout"}
 YYB_READY = {"scanned", "confirmed", "authorized", "approved", "ok", "success",
              "done", "ready", "loggedin"}
+
+# ============ yyb-go 浏览器会话（yyb_session cookie）缓存 ============
+# yyb-go 的 /qr、/accounts 等接口位于 requireBrowserSession() 中间件之后，
+# 需要浏览器会话 cookie（yyb_session）；Bearer 仅用于 /integration/* 接口。
+# 面板作为"浏览器"替身：必要时用配置的管理员账号登录 /login 取得 cookie 并缓存复用。
+_yyb_session = {"cookie": None, "ts": 0.0}
+_yyb_session_lock = threading.Lock()
+_YYB_SESSION_TTL = 6 * 24 * 3600  # 6 天，短于 yyb-go 默认 7 天会话时长
+
+
+def _get_cached_session():
+    with _yyb_session_lock:
+        if _yyb_session["cookie"] and (time.time() - _yyb_session["ts"]) < _YYB_SESSION_TTL:
+            return _yyb_session["cookie"]
+    return None
+
+
+def _set_cached_session(cookie):
+    with _yyb_session_lock:
+        _yyb_session["cookie"] = cookie
+        _yyb_session["ts"] = time.time()
+
+
+def _yyb_login_cookie():
+    """登录 yyb-go 取得 yyb_session cookie。仅当 yyb-go 启用认证时有效。"""
+    cfg = _yyb_cfg()
+    user = (config.get_setting("yybgo_user", "") or "").strip()
+    pwd = (config.get_setting("yybgo_pass", "") or "").strip()
+    if not user or not pwd:
+        return None
+    try:
+        r = requests.post(cfg["url"] + "/login",
+                         json={"username": user, "password": pwd},
+                         timeout=10, allow_redirects=False)
+    except Exception:
+        return None
+    # 成功登录：Set-Cookie 带 yyb_session（若 auth==nil 则无 cookie，返回 None）
+    sc = r.headers.get("Set-Cookie", "")
+    m = re.search(r"yyb_session=([^;,\s]+)", sc)
+    if m:
+        return m.group(1)
+    for name, value in r.cookies.items():
+        if name == "yyb_session":
+            return value
+    return None
 
 
 def _yyb_cfg():
@@ -49,7 +102,14 @@ def _yyb_cfg():
 # ============ yyb-go 服务管理（本机程序启动/停止/状态） ============
 
 def _yyb_bin():
-    return (config.get_setting("yybgo_bin", "") or "").strip()
+    cfg = (config.get_setting("yybgo_bin", "") or "").strip()
+    if cfg and os.path.isfile(cfg):
+        return cfg
+    # 自动探测面板根目录下的内置 yyb-go.exe（随面板分发的 Windows 二进制）
+    bundled = os.path.join(BASE_DIR, "yyb-go.exe")
+    if os.path.isfile(bundled):
+        return bundled
+    return cfg
 
 
 def _yyb_args():
@@ -92,11 +152,16 @@ def _yyb_procs(bin_path=None):
     return out
 
 
-def _hidden_start(cmdline, workdir):
-    """通过 run_hidden.vbs 以隐藏窗口、不等待方式启动命令（进程独立于本面板）。"""
+def _hidden_start(cmdline, workdir, env=None):
+    """通过 run_hidden.vbs 以隐藏窗口、不等待方式启动命令（进程独立于本面板）。
+    env: 额外注入的环境变量（合并到当前环境，向下透传给 yyb-go 子进程）。
+    """
+    base_env = dict(os.environ)
+    if env:
+        base_env.update(env)
     subprocess.run(
         ["wscript.exe", "//nologo", HIDDEN_VBS, cmdline, workdir],
-        cwd=BASE_DIR, timeout=30,
+        cwd=BASE_DIR, timeout=30, env=base_env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
@@ -152,8 +217,12 @@ def yyb_service_start():
     # 这里用隐藏启动器的参数形式拼命令行，输出重定向交给 yyb-go 自身（若无输出则静默）。
     extra = _yyb_args()
     cmdline = f'"{bin_path}"' + (f" {extra}" if extra else "")
+    # 内置分发场景：默认关闭 yyb-go 自带认证（本地 127.0.0.1 使用，面板已用 api_token 保护），
+    # 使 /qr、/accounts 等接口无需浏览器登录即可被面板直接调用。需要认证的外置 yyb-go 仍可用
+    # 面板「yybgo 账号/密码」配置 + 自适应登录流程对接。
+    env = {"YYB_AUTH_DRIVER": "none"}
     try:
-        _hidden_start(cmdline, workdir)
+        _hidden_start(cmdline, workdir, env=env)
     except Exception as e:
         return json_err(f"启动失败: {e}")
     # 等待端口就绪（最多 12s）
@@ -212,11 +281,35 @@ def _yyb_call(method, path, **kw):
     if cfg["token"]:
         headers["Authorization"] = "Bearer " + cfg["token"]
     timeout = kw.pop("timeout", 60)
+    # 不自动跟随重定向：这样 /qr 在无会话时会返回原始的 303（跳 /login）而非被吞成 200 HTML
+    allow_redirects = kw.pop("allow_redirects", False)
+    # 需要浏览器会话的接口（/qr、/accounts）注入 yyb_session cookie
+    need_session = path.startswith("/qr") or path.startswith("/accounts")
+    cookies = {}
+    if need_session:
+        ck = _get_cached_session()
+        if ck:
+            cookies["yyb_session"] = ck
     try:
-        r = requests.request(method, cfg["url"] + path, headers=headers, timeout=timeout, **kw)
-        return r, None
+        r = requests.request(method, cfg["url"] + path, headers=headers,
+                            cookies=cookies, timeout=timeout,
+                            allow_redirects=allow_redirects, **kw)
     except Exception as e:
         return None, str(e)
+    # 认证缺口：303 重定向到 /login，或 401 未登录 -> 尝试登录拿 cookie 后重试一次
+    # （cookie 缺失或已失效都会触发；登录成功后最多重试一次，避免死循环）
+    if need_session and (r.status_code in (401, 303) or
+                         (r.status_code == 200 and not (r.text or "").lstrip().startswith(("{", "[")))):
+        ck = _yyb_login_cookie()
+        if ck:
+            _set_cached_session(ck)
+            try:
+                r = requests.request(method, cfg["url"] + path, headers=headers,
+                                    cookies={"yyb_session": ck}, timeout=timeout,
+                                    allow_redirects=allow_redirects, **kw)
+            except Exception as e:
+                return None, str(e)
+    return r, None
 
 
 def _extract_list(j):
@@ -256,6 +349,8 @@ def get_yyb_config():
         "host": cfg["host"],
         "port": cfg["port"],
         "has_token": bool(cfg["token"]),
+        "has_user": bool((config.get_setting("yybgo_user", "") or "").strip()),
+        "has_pass": bool((config.get_setting("yybgo_pass", "") or "").strip()),
         "bin": _yyb_bin(),
         "args": _yyb_args(),
     })
@@ -280,6 +375,12 @@ def save_yyb_config():
         config.set_setting("yybgo_bin", (b.get("bin") or "").strip())
     if "args" in b:
         config.set_setting("yybgo_args", (b.get("args") or "").strip())
+    # 管理员账号/密码：仅用于对接启用了自带认证（YYB_AUTH_DRIVER!=none）的外置 yyb-go，
+    # 面板据此登录 /login 取得 yyb_session cookie。内置免认证模式无需填写。
+    if "user" in b:
+        config.set_setting("yybgo_user", (b.get("user") or "").strip())
+    if "pass" in b:
+        config.set_setting("yybgo_pass", (b.get("pass") or "").strip())
     return json_ok(msg="已保存 yyb-go 配置")
 
 
@@ -372,6 +473,8 @@ def create_qr():
     if err:
         return json_err("无法连接 yyb-go: " + err)
     if r.status_code != 200:
+        if r.status_code in (401, 303):
+            return json_err("yyb-go 需要登录认证，请在其配置中填写管理员账号/密码，或启动参数加 YYB_AUTH_DRIVER=none 关闭自带认证")
         return json_err("yyb-go 返回 HTTP %s" % r.status_code)
     data = (r.json() or {}).get("data", {})
     img = data.get("image_base64")
@@ -395,6 +498,10 @@ def poll_qr(sid):
     r, err = _yyb_call("GET", "/qr/%s/poll" % sid)
     if err:
         return json_err("无法连接 yyb-go: " + err)
+    if r.status_code != 200:
+        if r.status_code in (401, 303):
+            return json_err("yyb-go 会话已失效，请刷新二维码")
+        return json_err("yyb-go 返回 HTTP %s" % r.status_code)
     data = (r.json() or {}).get("data", {}) if r.status_code == 200 else {}
     status = (data.get("status") or "").lower()
     expired = status in YYB_TERMINAL
@@ -436,4 +543,6 @@ def confirm_qr(sid):
     if r.status_code == 409:
         # 登录缓冲尚未就绪（用户尚未在手机端确认），前端继续轮询
         return json_ok({"ready": False, "status": "not_ready"})
+    if r.status_code in (401, 303):
+        return json_err("yyb-go 会话已失效，请刷新二维码")
     return json_err("确认失败: yyb-go HTTP %s" % r.status_code)
