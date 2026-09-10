@@ -239,13 +239,24 @@ def yyb_service_start():
     # 内置分发场景：默认关闭 yyb-go 自带认证（本地 127.0.0.1 使用，面板已用 api_token 保护），
     # 使 /qr、/accounts 等接口无需浏览器登录即可被面板直接调用。需要认证的外置 yyb-go 仍可用
     # 面板「yybgo 账号/密码」配置 + 自适应登录流程对接。
+    cfg = _yyb_cfg()
     cmd = [bin_path]
     extra = _yyb_args()
+    # 自动注入 host/port，除非用户在自定义 args 里已显式指定
+    extra_parts = []
     if extra:
         try:
-            cmd.extend(shlex.split(extra, posix=False))
+            extra_parts = shlex.split(extra, posix=False)
         except Exception:
-            cmd.extend(extra.split())
+            extra_parts = extra.split()
+    has_host = any(str(x).lower().startswith(("-host", "--host")) for x in extra_parts)
+    has_port = any(str(x).lower().startswith(("-port", "--port")) for x in extra_parts)
+    if not has_host:
+        cmd.extend(["-host", cfg["host"]])
+    if not has_port:
+        cmd.extend(["-port", str(cfg["port"])])
+    if extra_parts:
+        cmd.extend(extra_parts)
     env = {"YYB_AUTH_DRIVER": "none"}
     try:
         _hidden_start(cmd, workdir, env=env)

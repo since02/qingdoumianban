@@ -23,3 +23,4 @@ Thumbs.db
 
 # ===== 测试/临时产物（yyb-go 冒烟测试等） =====
 _yybtest/
+resource/

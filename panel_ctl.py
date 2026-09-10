@@ -153,25 +153,42 @@ def start():
     log.close()
 
     try:
+        # 统一用 Python subprocess 直接拉起，不再经过 panel_hidden.vbs。
+        # VBS 的 WshShell.Run 在接收含中文路径的命令行字符串时，易出现编码/拆分错误，
+        # 导致命令被拆成多个字符执行、app.py 参数丢失，最终面板无法启动。
+        py_candidates = [
+            os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe"),
+            sys.executable,
+            "python",
+        ]
+        py = None
+        for cand in py_candidates:
+            if isinstance(cand, str) and os.path.isfile(cand):
+                py = cand
+                break
+        if py is None:
+            py = py_candidates[-1]
+
+        flog = open(LOG_FILE, "a", encoding="utf-8", errors="replace")
+        flog.write(f"===== 通过 subprocess.Popen 启动面板（{py} app.py）=====\n")
+        flog.flush()
+
+        kwargs = {
+            "cwd": BASE_DIR,
+            "stdout": flog,
+            "stderr": subprocess.STDOUT,
+            "stdin": subprocess.DEVNULL,
+            "close_fds": True,
+        }
         if os.name == "nt":
-            # Windows：交由 panel_hidden.vbs 以「隐藏窗口 + 不等待」方式拉起，
-            # 这样进程不属于本控制台，关闭 bat 窗口也不会把面板一起杀掉
-            # （此前 DETACHED_PROCESS 方式在部分环境下仍会随调用方退出而终止）。
-            vbs = os.path.join(BASE_DIR, "panel_hidden.vbs")
-            if os.path.exists(vbs):
-                subprocess.run(["wscript.exe", "//nologo", vbs],
-                               cwd=BASE_DIR, timeout=30,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print("已通过隐藏方式启动面板（日志: data\\panel.log）")
-            else:  # vbs 缺失时退回直接启动
-                raise FileNotFoundError(vbs)
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            creationflags |= 0x08000000  # CREATE_NO_WINDOW
+            kwargs["creationflags"] = creationflags
         else:
-            py = sys.executable
-            flog = open(LOG_FILE, "a", encoding="utf-8", errors="replace")
-            subprocess.Popen([py, "app.py"], cwd=BASE_DIR,
-                             stdout=flog, stderr=subprocess.STDOUT,
-                             stdin=subprocess.DEVNULL, start_new_session=True)
-            print(f"已后台启动面板（日志: data{os.sep}panel.log）")
+            kwargs["start_new_session"] = True
+        subprocess.Popen([py, "app.py"], **kwargs)
+        print(f"已后台启动面板（日志: data{os.sep}panel.log）")
     except Exception as e:
         print(f"启动失败: {e}")
         with open(LOG_FILE, "a", encoding="utf-8", errors="replace") as f:
