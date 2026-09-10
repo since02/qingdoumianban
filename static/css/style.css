@@ -37,7 +37,21 @@
 [data-theme="light"] button.primary:hover { background: var(--accent-2); }
 [data-theme="light"] button.danger:hover { background: #fbe9e9; }
 [data-theme="light"] #nav a:hover { color: var(--text); }
-[data-theme="light"] .logview { background: #0d1117; }
+/* 日志区域统一白底黑字，便于阅读（无论当前主题是黑/白） */
+.logview {
+  background: #ffffff;
+  color: #1f2328;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+[data-theme="dark"] .logview {
+  background: #ffffff;
+  color: #1f2328;
+  border-color: #d8dee4;
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body {

@@ -29,7 +29,6 @@ from core import db, config
 from routes import json_ok, json_err, auth_required, get_json_body
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HIDDEN_VBS = os.path.join(BASE_DIR, "run_hidden.vbs")
 yyb_bp = Blueprint("yybgo", __name__, url_prefix="/api")
 
 YYB_TERMINAL = {"expired", "cancelled", "unknown", "timeout"}
@@ -152,18 +151,42 @@ def _yyb_procs(bin_path=None):
     return out
 
 
-def _hidden_start(cmdline, workdir, env=None):
-    """通过 run_hidden.vbs 以隐藏窗口、不等待方式启动命令（进程独立于本面板）。
-    env: 额外注入的环境变量（合并到当前环境，向下透传给 yyb-go 子进程）。
+def _hidden_start(cmd, workdir, env=None):
+    """后台、无窗口方式启动命令。
+
+    不再经过 run_hidden.vbs：中文路径在 VBS 命令行参数传递时易出现编码/找不到文件错误。
+    Windows 直接用 subprocess.Popen + CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS|CREATE_NO_WINDOW；
+    Linux 用 start_new_session。stdout/stderr 统一重定向到 data/yybgo.log 便于排错。
+    env: 额外注入的环境变量（合并到当前环境，向下透传给子进程）。
     """
     base_env = dict(os.environ)
     if env:
         base_env.update(env)
-    subprocess.run(
-        ["wscript.exe", "//nologo", HIDDEN_VBS, cmdline, workdir],
-        cwd=BASE_DIR, timeout=30, env=base_env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    log_path = os.path.join(BASE_DIR, "data", "yybgo.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log = open(log_path, "a", encoding="utf-8", errors="replace")
+    try:
+        log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动 yyb-go =====\n")
+        log.flush()
+    except Exception:
+        pass
+    kwargs = {
+        "cwd": workdir,
+        "env": base_env,
+        "stdout": log,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        creationflags |= 0x08000000  # CREATE_NO_WINDOW
+        kwargs["creationflags"] = creationflags
+        subprocess.Popen(cmd, **kwargs)
+    else:
+        kwargs["start_new_session"] = True
+        subprocess.Popen(cmd, **kwargs)
 
 
 @yyb_bp.route("/yybgo/service", methods=["GET"])
@@ -213,16 +236,19 @@ def yyb_service_start():
     if _port_listening(cfg["port"]):
         return json_err(f"端口 {cfg['port']} 已有服务在监听（可能已启动）")
     workdir = os.path.dirname(bin_path) or "."
-    # 日志写到 data/yybgo.log：借助外部隐藏启动器无法直接重定向，改由脚本自身输出兜底；
-    # 这里用隐藏启动器的参数形式拼命令行，输出重定向交给 yyb-go 自身（若无输出则静默）。
-    extra = _yyb_args()
-    cmdline = f'"{bin_path}"' + (f" {extra}" if extra else "")
     # 内置分发场景：默认关闭 yyb-go 自带认证（本地 127.0.0.1 使用，面板已用 api_token 保护），
     # 使 /qr、/accounts 等接口无需浏览器登录即可被面板直接调用。需要认证的外置 yyb-go 仍可用
     # 面板「yybgo 账号/密码」配置 + 自适应登录流程对接。
+    cmd = [bin_path]
+    extra = _yyb_args()
+    if extra:
+        try:
+            cmd.extend(shlex.split(extra, posix=False))
+        except Exception:
+            cmd.extend(extra.split())
     env = {"YYB_AUTH_DRIVER": "none"}
     try:
-        _hidden_start(cmdline, workdir, env=env)
+        _hidden_start(cmd, workdir, env=env)
     except Exception as e:
         return json_err(f"启动失败: {e}")
     # 等待端口就绪（最多 12s）

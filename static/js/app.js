@@ -17,7 +17,7 @@ function roleText(r) { return { admin: "管理员", op: "操作员", viewer: "�
 /* 主题（黑/白皮肤）初始化：尽早应用，避免闪烁，且不依赖 $ 助手（避免 TDZ 错误） */
 (function () {
   try {
-    var t = localStorage.getItem("qd_theme") || "dark";
+    var t = localStorage.getItem("qd_theme") || "light";
     document.documentElement.setAttribute("data-theme", t);
   } catch (e) {}
 })();
@@ -151,7 +151,7 @@ async function submitChangePw() {
 
 /* ---------- 主题皮肤（黑/白切换） ---------- */
 function applyTheme(t) {
-  if (!t) t = localStorage.getItem("qd_theme") || "dark";
+  if (!t) t = localStorage.getItem("qd_theme") || "light";
   document.documentElement.setAttribute("data-theme", t);
   localStorage.setItem("qd_theme", t);
   const btn = $("#theme-toggle-login");
@@ -437,7 +437,7 @@ async function subLogs(sid) {
     <div id="sublog-view" style="display:none;margin-top:12px;">
       <div class="toolbar" style="justify-content:space-between;"><b style="font-size:13px;" id="sublog-title">日志内容</b>
       <button class="sm ghost" onclick="subLogsBack()">← 返回列表</button></div>
-      <pre id="sublog-content" class="mono" style="max-height:380px;overflow:auto;background:var(--bg2,rgba(127,127,127,.08));padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all;font-size:12px;"></pre>
+      <pre id="sublog-content" class="mono logview" style="max-height:380px;overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all;font-size:12px;"></pre>
     </div></div>`,
     `<button class="ghost" onclick="closeModal()">关闭</button>`);
   const j = await apiGet(`/subscriptions/${sid}/logs`).catch(() => ({ code: 1 }));
