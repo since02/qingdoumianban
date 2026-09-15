@@ -1165,8 +1165,12 @@ async function jdQrAdd() {
     if (p.data.status === "scanned") $("#jd-qr-status").textContent = "📱 已扫码，请在手机上确认登录…";
     if (p.data.expired) {
       done = true; clearInterval(jdQrTimer); jdQrTimer = null;
-      $("#jd-qr-status").innerHTML = `<span class="badge b-red">二维码已过期</span> <button class="sm" onclick="jdQrAdd()">重新生成</button>`;
-    } else if (p.data.status === "confirmed") {
+      if (p.data.status === "error") {
+        $("#jd-qr-status").innerHTML = `<span class="badge b-red">获取失败</span> ${esc(p.data.msg || "")} <button class="sm" onclick="jdQrAdd()">重试</button>`;
+      } else {
+        $("#jd-qr-status").innerHTML = `<span class="badge b-red">二维码已过期</span> <button class="sm" onclick="jdQrAdd()">重新生成</button>`;
+      }
+    } else if (p.data.ready || p.data.status === "confirmed") {
       done = true; clearInterval(jdQrTimer); jdQrTimer = null;
       $("#jd-qr-status").innerHTML = `<span class="badge b-green">已确认</span> 正在获取 Cookie…`;
       const c = await apiPost(`/jdcookie/qr/${sid}/confirm`, {}).catch(() => ({ code: 1, msg: "请求失败" }));

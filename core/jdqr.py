@@ -174,9 +174,12 @@ class JdQrSession:
         return self._state()
 
     def _state(self):
-        return {"status": self.status, "msg": self.msg,
+        # 成功时对外返回 "confirmed"（前端轮询据此触发 confirm），同时给出 ready 布尔；
+        # 内部状态 self.status 保持 "success"。这样新旧前端逻辑都能正确驱动。
+        ready = self.status == "success"
+        return {"status": "confirmed" if ready else self.status, "msg": self.msg,
                 "expired": self.status in ("expired", "error"),
-                "ready": self.status == "success"}
+                "ready": ready}
 
     # ---- 3. 确认并取回 Cookie ----
     def confirm(self):
