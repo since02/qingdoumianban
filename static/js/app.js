@@ -1054,6 +1054,7 @@ async function renderJdCookie() {
   if (window.jdTimer) { clearInterval(window.jdTimer); window.jdTimer = null; }
   $("#main").innerHTML = `<div class="page-head"><div><h2>京东 Cookie</h2><div class="sub">内置京东扫码登录（纯 Python，无需外部程序），自动获取 pt_key/pt_pin 写入环境变量供青龙脚本使用</div></div>
     <div class="toolbar"><button class="primary" onclick="jdQrAdd()">＋ 扫码登录京东</button>
+    <button class="ghost" onclick="jdPasteCookie()">📋 粘贴 Cookie</button>
     <button class="ghost" onclick="renderJdCookie()">刷新</button></div></div>
     <div class="grid" style="grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
       <div class="card"><div class="page-head"><h2 style="font-size:15px;">登录源状态</h2></div>
@@ -1182,6 +1183,28 @@ async function jdQrAdd() {
       }
     }
   }, 2500);
+}
+async function jdPasteCookie() {
+  openModal("粘贴京东 Cookie（兜底通道）", `<div>
+    <p class="muted" style="font-size:12px;">扫码无法使用时，用手机/电脑浏览器登录京东网页版 → 打开控制台执行 <code>document.cookie</code> 复制，或浏览器扩展导出，把整段 <b>pt_key=...;pt_pin=...;</b> 粘到下面即可：</p>
+    <textarea id="jd-paste-box" rows="5" style="width:100%;font-family:monospace;" placeholder="pt_key=AAE...;pt_pin=xxx;"></textarea>
+    <div id="jd-paste-status" class="muted" style="margin-top:8px;"></div>
+  </div>`,
+  `<button class="ghost" onclick="closeModal()">取消</button>
+   <button class="primary" onclick="jdPasteSubmit()">写入 Cookie</button>`);
+}
+async function jdPasteSubmit() {
+  const v = ($("#jd-paste-box").value || "").trim();
+  if (!v) { $("#jd-paste-status").textContent = "请先粘贴 Cookie"; return; }
+  $("#jd-paste-status").textContent = "正在校验并写入…";
+  const j = await apiPost("/jdcookie/paste", { cookie: v }).catch(() => ({ code: 1, msg: "请求失败" }));
+  if (j.code === 0) {
+    $("#jd-paste-status").innerHTML = `<span class="badge b-green">已写入 ✅</span> 京东账号 ${esc(j.data.pt_pin || "")}`;
+    loadJdAccounts();
+    setTimeout(closeModal, 1500);
+  } else {
+    $("#jd-paste-status").innerHTML = `<span class="badge b-red">失败</span> ${esc(j.msg || "")}`;
+  }
 }
 async function jdCheck(ref) {
   if (!ref) return toast("缺少 ref", false);

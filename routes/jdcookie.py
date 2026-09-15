@@ -273,6 +273,38 @@ def jd_qr_confirm(sid):
                    msg="京东 Cookie 已获取并写入「%s」" % (_jd_cfg().get("cookie_env_name") or "JD_COOKIE"))
 
 
+@bp.route("/jdcookie/paste", methods=["POST"])
+@auth_required
+def jd_cookie_paste():
+    """兜底通道：扫码不行时，用户从京东网页版复制 Cookie 粘贴进来。
+    接受 pt_key=...;pt_pin=...; 形式的整段 cookie 文本。"""
+    b = get_json_body()
+    raw = (b.get("cookie") or "").strip()
+    if not raw:
+        return json_err("请粘贴京东 Cookie（pt_key=...;pt_pin=...;）")
+    cookie = normalize_pt_cookie(raw)
+    if not cookie:
+        return json_err("未能从粘贴内容中解析出 pt_key/pt_pin，请确认复制了完整的京东 Cookie")
+    pin = _pin_from(cookie)
+    ok, nick = verify_cookie(cookie)
+    if ok is False:
+        return json_err("Cookie 已失效，请重新从京东网页版复制最新 Cookie")
+    if ok is None:
+        # 网络不可达，仍先写入（可能只是本机无网），但提示用户
+        nick = nick or pin
+        ref = "jd_" + (pin or time.strftime("%Y%m%d%H%M%S"))
+        action = _write_env(cookie, pin, nick or pin)
+        _store_account(ref, nick or pin or "京东账号", cookie, True, errmsg="", openid=ref)
+        return json_ok({"pt_pin": pin, "nickname": nick, "action": action},
+                       msg="已写入（但本机无法联网校验，建议稍后点「校验」确认有效性）")
+    nick = nick or pin
+    ref = "jd_" + (pin or time.strftime("%Y%m%d%H%M%S"))
+    action = _write_env(cookie, pin, nick or pin)
+    _store_account(ref, nick or pin or "京东账号", cookie, True, errmsg="", openid=ref)
+    return json_ok({"pt_pin": pin, "nickname": nick, "action": action},
+                   msg="京东 Cookie 已写入「%s」✅" % (_jd_cfg().get("cookie_env_name") or "JD_COOKIE"))
+
+
 @bp.route("/jdcookie/check", methods=["POST"])
 @auth_required
 def jd_check_one():

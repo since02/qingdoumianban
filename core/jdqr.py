@@ -24,19 +24,36 @@ import time
 import urllib.parse
 import uuid
 
+import os
+import logging
 import requests
 
-# 京东 App 原生 UA（关键：京东 plogin tmauth 流程会按请求 UA 给 token 打“类型”标记。
-# 必须用 jdapp;android;... 这种京东 App 原生 UA 申请 token，否则下发的 token 会被
-# 当成“网页扫码”类型，京东 App 扫到后识别不了 → 提示“升级到最新版京东”。
-# 来源：经多个仍可用的社区实现（gitee jd_cookie、52pojie 分析帖）逐字核对确认。
+# 京东 plogin 扫码流程 UA。
+# 注意：经逐字核对多个仍在维护、被大量面板使用的社区实现
+# （gdstxl/jd_cookie、gitee jd_cookie，均为 limoe「面板专用版本」），它们用的就是这个
+# UCBrowser/iPhone 浏览器 UA（末尾 TM/{0} 填毫秒时间戳）。早期我曾误以为浏览器 UA 会触发
+# 京东 App「升级到最新版京东」提示而改成了 jdapp;android UA，结果实测仍失败——真正的根因是
+# 下方 new_login_entrance 的 returnurl 被 URL 编码了（社区实现传的是原始字符串），导致京东
+# 下发的 token 类型不对。故此处恢复为社区验证可用的浏览器 UA。
 UA = (
-    "jdapp;android;10.0.5;11;0393465333165363-5333430323261366;network/wifi;"
-    "model/M2102K1C;osVer/30;appBuild/88681;partner/lc001;eufv/1;jdSupportDarkMode/0;"
-    "Mozilla/5.0 (Linux; Android 11; M2102K1C Build/RKQ1.201112.002; wv) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/77.0.3865.120 "
-    "MQQBrowser/6.2 TBS/045534 Mobile Safari/537.36"
+    "Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_2 like Mac OS X; en-us) "
+    "AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8H7 "
+    "Safari/6533.18.5 UCBrowser/13.4.2.1122 TM/{0}"
 )
+
+# 逐步调试日志（写入 data/jdlogin.log），扫码异常时可直接把该文件发来分析定位
+try:
+    _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    _jdlog = logging.getLogger("jdqr")
+    if not _jdlog.handlers:
+        _h = logging.FileHandler(os.path.join(_LOG_DIR, "jdlogin.log"), encoding="utf-8")
+        _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        _jdlog.addHandler(_h)
+        _jdlog.setLevel(logging.DEBUG)
+except Exception:
+    _jdlog = logging.getLogger("jdqr")
+    _jdlog.addHandler(logging.NullHandler())
 
 LOGIN_APPID = "300"
 QR_URL_TMPL = "https://plogin.m.jd.com/cgi-bin/m/tmauth?appid=300&client_type=m&token={token}"
@@ -68,7 +85,7 @@ class JdQrSession:
 
     # ---- 内部工具 ----
     def _ua(self):
-        return UA
+        return UA.format(int(time.time() * 1000))
 
     def _referer(self, t_ms=None):
         t = t_ms or int(time.time() * 1000)
@@ -82,20 +99,28 @@ class JdQrSession:
     # ---- 1. 生成二维码 ----
     def create_qr(self):
         # 1-1) 取 s_token
+        # 关键：returnurl 必须传【原始字符串】，绝不能 URL 编码——京东按原始 returnurl 给
+        # token 打类型标记，编码后会生成 App 拒扫（提示「升级到最新版京东」）的 token。
+        # referer 也必须就是这个原始 new_login_entrance URL（与社区验证可用实现逐字一致）。
         t = int(time.time())
         ru = (
-            "https://wq.jd.com/passport/LoginRedirect?state=%d&returnurl="
-            "https://home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&/myJd/home.action"
+            "https://wq.jd.com/passport/LoginRedirect?state=%d"
+            "&returnurl=https://home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&/myJd/home.action"
             "&source=wq_passport" % t
         )
         url1 = ("https://plogin.m.jd.com/cgi-bin/mm/new_login_entrance?lang=chs&appid=300&returnurl="
-                + urllib.parse.quote(ru, safe=""))
-        r1 = self.s.get(url1, headers={"User-Agent": self._ua(), "Referer": url1}, timeout=20)
+                + ru)
+        h1 = {"User-Agent": self._ua(), "Referer": url1}
+        _jdlog.debug("GET new_login_entrance url=%s", url1)
+        r1 = self.s.get(url1, headers=h1, timeout=20)
         r1.raise_for_status()
         try:
             self.s_token = (r1.json() or {}).get("s_token", "")
         except Exception:
             self.s_token = ""
+        _jdlog.debug("new_login_entrance -> s_token=%s body=%s",
+                     (self.s_token[:20] + "...") if self.s_token else "(空)",
+                     (r1.text or "")[:160])
         if not self.s_token:
             raise RuntimeError("京东未返回 s_token（body: %s）" % (r1.text or "")[:120])
 
@@ -107,15 +132,19 @@ class JdQrSession:
                  "returnurl": RETURN_URL_TMPL.format(t=t2)}
         h2 = {"User-Agent": self._ua(), "Referer": self._referer(t2),
               "Content-Type": "application/x-www-form-urlencoded; Charset=UTF-8"}
+        _jdlog.debug("POST tmauthreflogurl url=%s referer=%s data=%s", url2, self._referer(t2), data2)
         r2 = self.s.post(url2, headers=h2, data=data2, timeout=20)
         r2.raise_for_status()
         try:
             self.token = (r2.json() or {}).get("token", "")
         except Exception:
             self.token = ""
+        self.okl_token = (self.s.cookies.get_dict() or {}).get("okl_token", "")
+        _jdlog.debug("tmauthreflogurl -> token=%s okl_token=%s body=%s",
+                     (self.token[:20] + "...") if self.token else "(空)",
+                     self.okl_token or "(空)", (r2.text or "")[:160])
         if not self.token:
             raise RuntimeError("京东未返回登录 token（body: %s）" % (r2.text or "")[:120])
-        self.okl_token = (self.s.cookies.get_dict() or {}).get("okl_token", "")
 
         # 1-3) 二维码内容（自行编码成图片）
         self.qr_url = QR_URL_TMPL.format(token=self.token)
@@ -136,14 +165,18 @@ class JdQrSession:
         h = {"User-Agent": self._ua(), "Referer": self._referer(t),
              "Content-Type": "application/x-www-form-urlencoded; Charset=UTF-8"}
         r = self.s.post(url, headers=h, data=data, timeout=20)
+        _jdlog.debug("POST tmauthchecktoken url=%s body=%s", url, (r.text or "")[:200])
         try:
             j = r.json()
         except Exception:
             raise RuntimeError("tmauthchecktoken 返回非 JSON：%s" % (r.text or "")[:120])
         code = j.get("errcode")
         self.msg = str(j.get("message") or "")
+        _jdlog.info("tmauthchecktoken errcode=%s message=%s", code, self.msg)
         if code == 0:
             # 登录成功：pt_key/pt_pin 经 Set-Cookie 下发（直接从响应头解析，绕开 cookie jar 域判断）
+            _jdlog.info("tmauthchecktoken 登录成功(errcode=0)；Set-Cookie 摘要=%s",
+                        ((r.headers.get("Set-Cookie") or "").replace("\r", "").replace("\n", "")[:200]) or "空")
             cookie = _parse_pt_from_headers(r.headers.get("Set-Cookie") or "")
             if not cookie:
                 cookie = self._extract_pt()
