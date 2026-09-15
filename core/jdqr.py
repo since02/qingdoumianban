@@ -26,11 +26,16 @@ import uuid
 
 import requests
 
-# 移动端 UA（京东 plogin 扫码流程要求，末尾 TM/{0} 填毫秒时间戳防缓存）
+# 京东 App 原生 UA（关键：京东 plogin tmauth 流程会按请求 UA 给 token 打“类型”标记。
+# 必须用 jdapp;android;... 这种京东 App 原生 UA 申请 token，否则下发的 token 会被
+# 当成“网页扫码”类型，京东 App 扫到后识别不了 → 提示“升级到最新版京东”。
+# 来源：经多个仍可用的社区实现（gitee jd_cookie、52pojie 分析帖）逐字核对确认。
 UA = (
-    "Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_2 like Mac OS X; en-us) "
-    "AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8H7 "
-    "Safari/6533.18.5 UCBrowser/13.4.2.1122 TM/{0}"
+    "jdapp;android;10.0.5;11;0393465333165363-5333430323261366;network/wifi;"
+    "model/M2102K1C;osVer/30;appBuild/88681;partner/lc001;eufv/1;jdSupportDarkMode/0;"
+    "Mozilla/5.0 (Linux; Android 11; M2102K1C Build/RKQ1.201112.002; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/77.0.3865.120 "
+    "MQQBrowser/6.2 TBS/045534 Mobile Safari/537.36"
 )
 
 LOGIN_APPID = "300"
@@ -63,7 +68,7 @@ class JdQrSession:
 
     # ---- 内部工具 ----
     def _ua(self):
-        return UA.format(int(time.time() * 1000))
+        return UA
 
     def _referer(self, t_ms=None):
         t = t_ms or int(time.time() * 1000)
