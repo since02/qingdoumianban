@@ -17,16 +17,62 @@ def _sync_task_scheduler(task):
 @bp.route("/tasks", methods=["GET"])
 @auth_required
 def list_tasks():
-    rows = db.query("SELECT * FROM tasks ORDER BY id DESC")
+    search = (request.args.get("search") or "").strip().lower()
+    status = (request.args.get("status") or "").strip()  # "" / "0" / "1"
+    rows = [dict(r) for r in db.query("SELECT * FROM tasks ORDER BY id DESC")]
+    if search:
+        rows = [r for r in rows
+                if search in (r.get("name") or "").lower()
+                or search in (r.get("command") or "").lower()]
+    if status in ("0", "1"):
+        rows = [r for r in rows if str(r.get("status")) == status]
     out = []
     for r in rows:
-        d = dict(r)
         try:
-            d["next_run"] = next_run_time(r["schedule"]).strftime("%Y-%m-%d %H:%M:%S")
+            r["next_run"] = next_run_time(r["schedule"]).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
-            d["next_run"] = ""
-        out.append(d)
+            r["next_run"] = ""
+        out.append(r)
     return json_ok(out)
+
+
+@bp.route("/tasks/batch", methods=["POST"])
+@auth_required
+def batch_tasks():
+    """批量操作：enable / disable / run / delete。"""
+    b = get_json_body()
+    ids = b.get("ids") or []
+    action = b.get("action")
+    if not isinstance(ids, list) or not ids:
+        return json_err("请先选择任务")
+    if action not in ("enable", "disable", "run", "delete"):
+        return json_err("未知操作")
+    ok = 0
+    for raw in ids:
+        try:
+            tid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        if not task:
+            continue
+        if action == "delete":
+            db.execute("DELETE FROM tasks WHERE id=?", (tid,))
+            scheduler.remove_task_job(tid)
+            ok += 1
+        elif action in ("enable", "disable"):
+            st = 1 if action == "enable" else 0
+            db.execute("UPDATE tasks SET status=? WHERE id=?", (st, tid))
+            _sync_task_scheduler(task)
+            ok += 1
+        elif action == "run":
+            executor.submit(
+                task["command"], task_id=tid, task_name=task["name"],
+                notify=task["notify"], notify_type=task["notify_type"], kind="task",
+                lock_key=f"task:{tid}",
+            )
+            ok += 1
+    return json_ok(msg=f"已处理 {ok} 个任务")
 
 
 @bp.route("/tasks/active", methods=["GET"])

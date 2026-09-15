@@ -5,6 +5,11 @@ let ROLE = localStorage.getItem("qd_role") || "";
 let CURRENT = "dashboard";
 let metricsTimer = null;
 let filesTimer = null;
+// 列表选择/搜索状态（脚本、任务、变量共用模式）
+let scriptRows = [], scriptSel = new Set();
+let taskRows = [], taskSel = new Set();
+let taskActive = {};
+let envRows = [];
 
 /* 权限：viewer(0) < op(1) < admin(2) */
 function roleLevel(r) { return { viewer: 0, op: 1, admin: 2 }[r] || -1; }
@@ -221,29 +226,54 @@ function stat(n, l) { return `<div class="stat"><div class="num">${n}</div><div 
 
 /* ---------- 定时任务 ---------- */
 async function renderTasks() {
+  const op = canOp();
   $("#main").innerHTML = `<div class="page-head"><div><h2>定时任务</h2><div class="sub">支持 cron 定时执行 py / js / sh / 命令</div></div>
-    <div class="toolbar"><button class="ghost" onclick="renderTasks()">刷新</button>
-    ${canOp() ? `<button class="primary" onclick="taskForm()">+ 新建任务</button>
-    <button class="ghost" onclick="runOnceForm()">▶ 立即运行</button>` : ""}</div></div>
+    <div class="toolbar">
+      <input class="tb-input" id="t_search" placeholder="🔍 搜索名称/命令…" oninput="paintTasks()">
+      <select class="tb-input" id="t_status" onchange="paintTasks()">
+        <option value="">全部状态</option>
+        <option value="1">启用</option>
+        <option value="0">停用</option>
+      </select>
+      <button class="ghost" onclick="loadTasks()">刷新</button>
+      ${op ? `<button class="primary" onclick="taskForm()">+ 新建任务</button>
+      <button class="ghost" onclick="runOnceForm()">▶ 立即运行</button>` : ""}</div></div>
+    <div id="task-batch" class="batchbar" style="display:none;"></div>
     <div id="task-list">加载中…</div>`;
+  await loadTasks();
+}
+async function loadTasks() {
   const j = await apiGet("/tasks");
   if (j.code !== 0) return;
-  const rows = j.data;
-  // 运行中/排队状态
-  let activeMap = {};
+  taskRows = j.data;
+  await refreshTaskActive();
+  paintTasks();
+}
+async function refreshTaskActive() {
+  taskActive = {};
   try {
     const a = await apiGet("/tasks/active");
     if (a.code === 0) {
-      (a.data.running || []).forEach(r => { if (r.task_id) activeMap[r.task_id] = "running"; });
-      (a.data.queued_task_ids || []).forEach(tid => { if (!activeMap[tid]) activeMap[tid] = "queued"; });
+      (a.data.running || []).forEach(r => { if (r.task_id) taskActive[r.task_id] = "running"; });
+      (a.data.queued_task_ids || []).forEach(tid => { if (!taskActive[tid]) taskActive[tid] = "queued"; });
     }
   } catch (e) {}
-  if (!rows.length) { $("#task-list").innerHTML = `<div class="card empty">还没有任务，点击「新建任务」开始</div>`; return; }
+}
+function paintTasks() {
   const op = canOp();
+  const q = ($("#t_search")?.value || "").trim().toLowerCase();
+  const st = ($("#t_status")?.value || "");
+  let rows = taskRows;
+  if (q) rows = rows.filter(r => (r.name || "").toLowerCase().includes(q) || (r.command || "").toLowerCase().includes(q));
+  if (st) rows = rows.filter(r => String(r.status) === st);
+  if (!rows.length) { $("#task-list").innerHTML = `<div class="card empty">没有匹配的任务</div>`; $("#task-batch").style.display = "none"; return; }
+  const allChecked = rows.length && rows.every(t => taskSel.has(String(t.id)));
   $("#task-list").innerHTML = `<div class="card" style="padding:0;"><table><thead><tr>
+    ${op ? `<th style="width:32px;"><input type="checkbox" ${allChecked ? "checked" : ""} onchange="toggleSelAll(this,'task')"></th>` : ""}
     <th>名称</th><th>命令</th><th>计划(cron)</th><th>状态</th><th>上次结果</th><th>下次运行</th><th>操作</th></tr></thead><tbody>
     ${rows.map(t => `<tr>
-      <td><b>${esc(t.name)}</b>${activeMap[t.id] === "running" ? ' <span class="badge b-blue">运行中</span>' : activeMap[t.id] === "queued" ? ' <span class="badge b-yellow">排队中</span>' : ''}</td>
+      ${op ? `<td><input type="checkbox" class="task-chk" data-name="${t.id}" ${taskSel.has(String(t.id)) ? "checked" : ""} onchange="onTaskCheck(this)"></td>` : ""}
+      <td><b>${esc(t.name)}</b>${taskActive[t.id] === "running" ? ' <span class="badge b-blue">运行中</span>' : taskActive[t.id] === "queued" ? ' <span class="badge b-yellow">排队中</span>' : ''}</td>
       <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(t.command)}">${esc(t.command)}</td>
       <td class="mono">${esc(t.schedule)}</td>
       <td>${t.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
@@ -257,6 +287,33 @@ async function renderTasks() {
         <button class="sm danger" onclick="delTask(${t.id})">删</button>` : ""}
       </td></tr>`).join("")}
   </tbody></table></div>`;
+  paintTaskBatch(op);
+}
+function onTaskCheck(el) {
+  const id = String(el.dataset.name);
+  if (el.checked) taskSel.add(id); else taskSel.delete(id);
+  paintTaskBatch(canOp());
+}
+function paintTaskBatch(op) {
+  const bar = $("#task-batch");
+  if (!op || !taskSel.size) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+  bar.style.display = "flex";
+  bar.innerHTML = `<span class="muted">已选 ${taskSel.size} 个</span>
+    <button class="sm primary" onclick="taskBatch('enable')">批量启用</button>
+    <button class="sm" onclick="taskBatch('disable')">批量停用</button>
+    <button class="sm" onclick="taskBatch('run')">批量运行</button>
+    <button class="sm danger" onclick="taskBatch('delete')">批量删除</button>
+    <button class="sm ghost" onclick="taskSel.clear();paintTasks()">取消选择</button>`;
+}
+async function taskBatch(action) {
+  const ids = [...taskSel];
+  if (!ids.length) return;
+  const lbl = { enable: "启用", disable: "停用", run: "运行", delete: "删除" }[action];
+  if ((action === "delete" || action === "run") && !confirm("确认批量" + lbl + "选中的 " + ids.length + " 个任务？")) return;
+  const j = await apiPost("/tasks/batch", { ids, action });
+  toast(j.code === 0 ? (j.msg || "已处理") : (j.msg || "失败"), j.code === 0);
+  taskSel.clear();
+  loadTasks();
 }
 function taskForm(id) {
   const isEdit = !!id;
@@ -314,28 +371,146 @@ async function viewTaskLogs(tid, name) {
 }
 async function viewLog(lid) {
   const j = await apiGet("/logs/" + lid); if (j.code !== 0) return;
-  openModal("日志 #" + lid + " · " + (j.data.log.status || ""), `<div class="logview">${esc(j.data.content || "")}</div>`,
+  window._logRaw = j.data.content || "";
+  openModal("日志 #" + lid + " · " + (j.data.log.status || ""), `
+    <input class="tb-input" id="log_search" placeholder="🔍 搜索日志内容…" style="width:100%;margin-bottom:8px;" oninput="hlLog(this.value)">
+    <div class="logview" id="logview">${esc(window._logRaw)}</div>`,
     `<button class="primary" onclick="closeModal()">关闭</button>`, true);
+}
+function hlLog(q) {
+  const raw = window._logRaw || "";
+  const box = $("#logview"); if (!box) return;
+  q = (q || "").trim();
+  if (!q) { box.innerHTML = esc(raw); return; }
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  let out = "", last = 0, m;
+  while ((m = re.exec(raw))) {
+    out += esc(raw.slice(last, m.index)) + "<mark>" + esc(m[0]) + "</mark>";
+    last = m.index + m[0].length;
+    if (m.index === re.lastIndex) re.lastIndex++;
+  }
+  out += esc(raw.slice(last));
+  box.innerHTML = out;
 }
 
 /* ---------- 脚本管理 ---------- */
 async function renderScripts() {
+  const op = canOp();
   $("#main").innerHTML = `<div class="page-head"><div><h2>脚本管理</h2><div class="sub">data/scripts 自建脚本 + data/subs 订阅拉取的脚本（subs/ 前缀），可直接编辑 / 运行</div></div>
-    <div class="toolbar"><button class="ghost" onclick="renderScripts()">刷新</button>
-    ${canOp() ? `<button class="primary" onclick="scriptForm()">+ 新建脚本</button>` : ""}</div></div>
+    <div class="toolbar">
+      <input class="tb-input" id="s_search" placeholder="🔍 搜索文件名…" oninput="filterScripts()">
+      <select class="tb-input" id="s_dir" onchange="loadScripts()">
+        <option value="">全部目录</option>
+        <option value="scripts">自建脚本</option>
+        <option value="subs">订阅脚本</option>
+      </select>
+      <button class="ghost" onclick="openScriptContentSearch()">🔎 内容搜索</button>
+      <button class="ghost" onclick="loadScripts()">刷新</button>
+      ${op ? `<button class="primary" onclick="scriptForm()">+ 新建脚本</button>` : ""}
+    </div></div>
+    <div id="script-batch" class="batchbar" style="display:none;"></div>
     <div id="script-list">加载中…</div>`;
+  await loadScripts();
+}
+async function loadScripts() {
   const j = await apiGet("/scripts");
   if (j.code !== 0) return;
-  const rows = j.data;
-  if (!rows.length) { $("#script-list").innerHTML = `<div class="card empty">暂无脚本</div>`; return; }
+  scriptRows = j.data;
+  paintScripts();
+}
+function filterScripts() { paintScripts(); }
+function paintScripts() {
+  const op = canOp();
+  const q = ($("#s_search")?.value || "").trim().toLowerCase();
+  const dir = ($("#s_dir")?.value || "");
+  let rows = scriptRows;
+  if (dir === "scripts") rows = rows.filter(r => !r.name.startsWith("subs/"));
+  else if (dir === "subs") rows = rows.filter(r => r.name.startsWith("subs/"));
+  if (q) rows = rows.filter(r => r.name.toLowerCase().includes(q));
+  if (!rows.length) {
+    $("#script-list").innerHTML = `<div class="card empty">没有匹配的脚本</div>`;
+    $("#script-batch").style.display = "none";
+    return;
+  }
+  const allChecked = rows.length && rows.every(r => scriptSel.has(r.name));
   $("#script-list").innerHTML = `<div class="card" style="padding:0;"><table><thead><tr>
+    ${op ? `<th style="width:32px;"><input type="checkbox" ${allChecked ? "checked" : ""} onchange="toggleSelAll(this,'script')"></th>` : ""}
     <th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>
-    ${rows.map(f => `<tr><td class="mono">${esc(f.name)}</td><td class="muted">${fmtSize(f.size)}</td>
+    ${rows.map(f => `<tr>
+      ${op ? `<td><input type="checkbox" class="script-chk" data-name="${esc(f.name)}" ${scriptSel.has(f.name) ? "checked" : ""} onchange="onScriptCheck(this)"></td>` : ""}
+      <td class="mono">${esc(f.name)}</td><td class="muted">${fmtSize(f.size)}</td>
       <td class="muted nowrap">${new Date(f.mtime * 1000).toLocaleString()}</td>
-      <td class="nowrap">${canOp() ? `<button class="sm" onclick="scriptForm('${encodeURIComponent(f.name)}')">编辑</button>
+      <td class="nowrap">${op ? `<button class="sm" onclick="scriptForm('${encodeURIComponent(f.name)}')">编辑</button>
       <button class="sm" onclick="runScript('${encodeURIComponent(f.name)}')">运行</button>
       <button class="sm danger" onclick="delScript('${encodeURIComponent(f.name)}')">删</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div>`;
+  paintScriptBatch(op);
+}
+function onScriptCheck(el) {
+  const n = el.dataset.name;
+  if (el.checked) scriptSel.add(n); else scriptSel.delete(n);
+  paintScriptBatch(canOp());
+}
+function toggleSelAll(el, kind) {
+  const set = kind === "script" ? scriptSel : taskSel;
+  const cls = kind === "script" ? ".script-chk" : ".task-chk";
+  $$(cls).forEach(c => { const n = c.dataset.name; if (el.checked) set.add(n); else set.delete(n); c.checked = el.checked; });
+  if (kind === "script") paintScriptBatch(canOp()); else paintTaskBatch(canOp());
+}
+function paintScriptBatch(op) {
+  const bar = $("#script-batch");
+  if (!op || !scriptSel.size) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+  bar.style.display = "flex";
+  bar.innerHTML = `<span class="muted">已选 ${scriptSel.size} 个</span>
+    <button class="sm primary" onclick="batchRunScripts()">批量运行</button>
+    <button class="sm danger" onclick="batchDelScripts()">批量删除</button>
+    <button class="sm ghost" onclick="scriptSel.clear();paintScripts()">取消选择</button>`;
+}
+async function batchRunScripts() {
+  const names = [...scriptSel];
+  if (!names.length) return;
+  for (const n of names) await apiPost("/scripts/" + encodeURIComponent(n) + "/run", {});
+  scriptSel.clear(); toast("已批量提交运行 " + names.length + " 个脚本"); paintScripts();
+}
+async function batchDelScripts() {
+  const names = [...scriptSel];
+  if (!names.length) return;
+  if (!confirm("确认删除选中的 " + names.length + " 个脚本？此操作不可恢复")) return;
+  for (const n of names) await apiDel("/scripts/" + n);
+  scriptSel.clear(); toast("已批量删除"); loadScripts();
+}
+function openScriptContentSearch() {
+  openModal("脚本内容搜索", `
+    <input class="tb-input" id="cs_q" placeholder="输入关键词，搜索脚本文件内容…" style="width:100%;"
+      oninput="doScriptContentSearch()">
+    <div id="cs_result" style="margin-top:12px;">输入关键词后自动搜索（同时匹配文件名与内容）</div>`,
+    `<button class="primary" onclick="closeModal()">关闭</button>`, true);
+  setTimeout(() => { const e = $("#cs_q"); if (e) e.focus(); }, 50);
+}
+let _csTimer = null;
+async function doScriptContentSearch() {
+  const q = $("#cs_q")?.value.trim();
+  const box = $("#cs_result");
+  if (!q) { box.innerHTML = "输入关键词后自动搜索（同时匹配文件名与内容）"; return; }
+  clearTimeout(_csTimer);
+  _csTimer = setTimeout(async () => {
+    const j = await apiGet("/scripts/search?q=" + encodeURIComponent(q));
+    if (j.code !== 0) { box.innerHTML = `<div class="empty">搜索失败</div>`; return; }
+    const d = j.data;
+    let html = "";
+    if (d.name_matches.length) {
+      html += `<div class="muted" style="margin:6px 0 2px;">文件名匹配 (${d.name_matches.length})</div>`;
+      html += d.name_matches.map(s => `<div class="cs-item" onclick="scriptForm('${encodeURIComponent(s.name)}');closeModal()">📄 ${esc(s.name)}</div>`).join("");
+    }
+    if (d.content_matches.length) {
+      html += `<div class="muted" style="margin:8px 0 2px;">内容匹配 (${d.content_matches.length} 个文件)</div>`;
+      html += d.content_matches.map(c => {
+        const hits = c.hits.map(h => `<div class="cs-hit" onclick="scriptForm('${encodeURIComponent(c.name)}');closeModal()"><span class="cs-line">L${h.line}</span>${esc(h.text)}</div>`).join("");
+        return `<div class="cs-file">📄 ${esc(c.name)} <span class="badge b-gray">${c.total} 处</span></div>${hits}`;
+      }).join("");
+    }
+    box.innerHTML = html || `<div class="empty">未找到匹配</div>`;
+  }, 300);
 }
 function fmtSize(b) { if (b < 1024) return b + " B"; if (b < 1048576) return (b / 1024).toFixed(1) + " KB"; return (b / 1048576).toFixed(1) + " MB"; }
 async function scriptForm(name) {
@@ -516,18 +691,31 @@ async function viewDepLog(id) {
 
 /* ---------- 环境变量 ---------- */
 async function renderEnvs() {
+  const op = canOp();
   $("#main").innerHTML = `<div class="page-head"><div><h2>环境变量</h2><div class="sub">所有启用变量会在任务执行时注入环境</div></div>
-    <div class="toolbar"><button class="ghost" onclick="renderEnvs()">刷新</button>
-    ${canOp() ? `<button class="primary" onclick="envForm()">+ 新建变量</button>` : ""}</div></div>
+    <div class="toolbar">
+      <input class="tb-input" id="e_search" placeholder="🔍 搜索名称/值/备注…" oninput="paintEnvs()">
+      <button class="ghost" onclick="renderEnvs()">刷新</button>
+      ${op ? `<button class="primary" onclick="envForm()">+ 新建变量</button>` : ""}</div></div>
     <div id="env-list">加载中…</div>`;
-  const j = await apiGet("/environments"); if (j.code !== 0) return;
-  const rows = j.data;
+  const j = await apiGet("/environments");
+  if (j.code !== 0) return;
+  envRows = j.data;
+  paintEnvs();
+}
+function paintEnvs() {
+  const op = canOp();
+  const q = ($("#e_search")?.value || "").trim().toLowerCase();
+  const rows = q ? envRows.filter(e =>
+    (e.name || "").toLowerCase().includes(q) ||
+    (e.value || "").toLowerCase().includes(q) ||
+    (e.remarks || "").toLowerCase().includes(q)) : envRows;
   $("#env-list").innerHTML = rows.length ? `<div class="card" style="padding:0;"><table><thead><tr>
     <th>名称</th><th>值</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>
     ${rows.map(e => `<tr><td class="mono"><b>${esc(e.name)}</b></td><td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.value)}">${esc(e.value)}</td>
       <td class="muted">${esc(e.remarks || "")}</td>      <td>${e.status == 1 ? badge("启用", "b-green") : badge("停用", "b-gray")}</td>
-      <td class="nowrap">${canOp() ? `<button class="sm" onclick="envForm(${e.id})">编辑</button><button class="sm danger" onclick="delEnv(${e.id})">删</button>` : ""}</td></tr>`).join("")}
-  </tbody></table></div>` : `<div class="card empty">暂无变量</div>`;
+      <td class="nowrap">${op ? `<button class="sm" onclick="envForm(${e.id})">编辑</button><button class="sm danger" onclick="delEnv(${e.id})">删</button>` : ""}</td></tr>`).join("")}
+  </tbody></table></div>` : `<div class="card empty">没有匹配的变量</div>`;
 }
 function envForm(id) {
   openModal(id ? "编辑变量" : "新建变量",

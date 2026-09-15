@@ -125,6 +125,16 @@ input, select, textarea {
   border-radius: 8px; padding: 9px 11px; outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+.tb-input { width: 200px; }
+.batchbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); }
+.batchbar .muted { margin-right: 4px; }
+.cs-item, .cs-file { padding: 4px 6px; cursor: pointer; border-radius: 6px; }
+.cs-item:hover, .cs-file:hover { background: var(--bg-hover); }
+.cs-hit { padding: 2px 6px 2px 22px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; cursor: pointer; color: var(--text-dim); white-space: pre-wrap; }
+.cs-hit:hover { background: var(--bg-hover); }
+.cs-line { color: var(--accent); margin-right: 6px; }
+.cs-file { font-weight: 600; margin-top: 6px; }
+mark { background: #ffe58a; color: #1a1a1a; border-radius: 3px; padding: 0 2px; }
 textarea { resize: vertical; min-height: 80px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12.5px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 

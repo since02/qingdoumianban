@@ -51,7 +51,51 @@ def _list_scripts():
 @bp.route("/scripts", methods=["GET"])
 @auth_required
 def list_scripts():
-    return json_ok(_list_scripts())
+    dir_filter = (request.args.get("dir") or "").strip()      # "" / "scripts" / "subs"
+    q = (request.args.get("q") or "").strip().lower()          # 文件名过滤
+    out = _list_scripts()
+    if dir_filter == "scripts":
+        out = [s for s in out if not s["name"].startswith(SUBS_PREFIX)]
+    elif dir_filter == "subs":
+        out = [s for s in out if s["name"].startswith(SUBS_PREFIX)]
+    if q:
+        out = [s for s in out if q in s["name"].lower()]
+    return json_ok(out)
+
+
+@bp.route("/scripts/search", methods=["GET"])
+@auth_required
+def search_scripts():
+    """全文搜索：同时匹配文件名与文件内容（含行号与片段），对标青龙脚本搜索。"""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return json_ok({"name_matches": [], "content_matches": []})
+    ql = q.lower()
+    all_scripts = _list_scripts()
+    name_matches = [s for s in all_scripts if ql in s["name"].lower()]
+    content_matches = []
+    for s in all_scripts:
+        sp = _safe_path(s["name"])
+        if not sp or not os.path.isfile(sp[0]):
+            continue
+        try:
+            with open(sp[0], "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        hits = []
+        total = 0
+        for i, line in enumerate(lines, 1):
+            if ql in line.lower():
+                total += 1
+                if len(hits) < 5:
+                    snippet = line.strip()
+                    if len(snippet) > 200:
+                        snippet = snippet[:200] + "…"
+                    hits.append({"line": i, "text": snippet})
+        if total:
+            content_matches.append({"name": s["name"], "hits": hits, "total": total})
+    return json_ok({"name_matches": name_matches, "content_matches": content_matches})
 
 
 @bp.route("/scripts/<path:name>", methods=["GET"])
