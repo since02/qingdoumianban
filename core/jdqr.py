@@ -3,12 +3,14 @@
 替代 yyb-go 的最终产出（pt_key/pt_pin）：
   1) GET  qr.m.jd.com/show            -> 二维码图片 + wlfstk_smdl token
   2) 轮询 GET qr.m.jd.com/check       -> 201 未扫 / 202 已扫待确认 / 203 过期 / 200 成功(ticket)
-  3) GET  pt.m.jd.com/user/login      -> 用 ticket 换 pt_key/pt_pin 会话 Cookie
+  3) GET  passport.jd.com/uc/qrCodeTicketValidation?t=<ticket>
+                                    -> returnCode=0 时经 Set-Cookie 下发 pt_key/pt_pin
 
 接口形态与 yyb-go 对齐（create/poll/confirm 三段式），面板与独立脚本均可复用。
 """
 import base64
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -149,17 +151,31 @@ class JdQrSession:
             raise RuntimeError(
                 "京东二维码校验未通过（returnCode=%s%s），请重新生成二维码并在手机京东 App 上确认"
                 % (rc, "，%s" % msg if msg else ""))
-        # 让登录态 Cookie 落到主域（pt_key/pt_pin 通过校验响应下发，必要时再访问主页兜底）
-        try:
-            self.s.get("https://www.jd.com/", timeout=15)
-        except Exception:
-            pass
-        cookie = self._extract_pt()
+        # returnCode=0 表示校验通过。京东会在校验响应的 Set-Cookie 里下发 pt_key/pt_pin。
+        # 直接用正则从 Set-Cookie 头解析，绕开 cookie jar 的 domain/属性判断（最可靠）。
+        cookie = _parse_pt_from_headers(r.headers.get("Set-Cookie") or "")
+        # 兜底：部分情况下主域 pt_key 需再访问一次主页才落地
+        if not cookie:
+            try:
+                r2 = self.s.get("https://www.jd.com/", timeout=15, allow_redirects=True)
+                cookie = _parse_pt_from_headers(r2.headers.get("Set-Cookie") or "")
+            except Exception:
+                pass
+        if not cookie:
+            cookie = self._extract_pt()
         if not cookie:
             names = sorted({c.name for c in self.s.cookies if "pt" in c.name.lower()})
+            sc = (r.headers.get("Set-Cookie") or "").replace("\r", "").replace("\n", "")[:400]
             raise RuntimeError(
-                "登录校验已通过（returnCode=0），但会话中未解析到 pt_key/pt_pin"
-                "（当前会话含 pt 类 cookie: %s）" % (",".join(names) or "无"))
+                "登录校验已通过（returnCode=0），但未能从响应中解析到 pt_key/pt_pin。"
+                "（会话 pt 类 cookie: %s；校验响应 Set-Cookie 摘要: %s）"
+                % (",".join(names) or "无", sc or "空"))
+        # 写回 session，便于后续 verify_cookie / 续期使用
+        for name, value in _split_pt(cookie).items():
+            try:
+                self.s.cookies.set(name, value, domain=".jd.com", path="/")
+            except Exception:
+                pass
         self.cookie = cookie
         self.pt_pin = _pin_of(cookie)
         self.status = "success"
@@ -190,6 +206,35 @@ def _pin_of(cookie):
     if not m:
         return ""
     return urllib.parse.unquote(m.group(1))
+
+
+def _parse_pt_from_headers(set_cookie_str):
+    """从 Set-Cookie 响应头字符串里直接提取 pt_key/pt_pin（绕开 cookie jar 的域判断）。
+
+    京东在 qrCodeTicketValidation returnCode=0 时通过 Set-Cookie 下发这两个 cookie，
+    但 requests 的 cookie jar 受 domain / SameSite / Partitioned 等属性影响，可能漏存，
+    因此这里直接对原始头做正则解析，最稳妥。
+    """
+    if not set_cookie_str:
+        return ""
+    text = set_cookie_str.replace("\r", "").replace("\n", "")
+    k = re.search(r"pt_key=([^;,\s]+)", text)
+    p = re.search(r"pt_pin=([^;,\s]+)", text)
+    if k and p:
+        return "pt_key=%s;pt_pin=%s;" % (k.group(1), p.group(1))
+    return ""
+
+
+def _split_pt(cookie):
+    """'pt_key=...;pt_pin=...;' -> {name: value}"""
+    out = {}
+    for part in cookie.split(";"):
+        part = part.strip()
+        if "=" in part:
+            n, v = part.split("=", 1)
+            if n.strip() in ("pt_key", "pt_pin"):
+                out[n.strip()] = v
+    return out
 
 
 # ============ 会话注册表（线程安全 + 自动清理） ============
