@@ -124,40 +124,48 @@ class JdQrSession:
         if self.status != "confirmed" or not self.ticket:
             raise RuntimeError("用户尚未在手机上确认（当前状态: %s）" % self.status)
         ticket = self.ticket
-        ret_pc = urllib.parse.quote("https://www.jd.com/", safe="")
-        # 多端点依次尝试：PC passport 优先（appid=133 的 ticket 由 PC 扫码页签发）
-        attempts = [
-            ("https://passport.jd.com/uc/login?ticket=%s&ReturnUrl=%s" % (ticket, ret_pc),
-             UA_PC, "https://passport.jd.com/new/login.aspx"),
-            ("https://pt.m.jd.com/user/login?%s" % urllib.parse.urlencode(
-                {"ticket": ticket, "appid": QR_APPID, "returnurl": "https://www.jd.com/"}),
-             UA_M, "https://plogin.m.jd.com/login/login?appid=%s" % QR_APPID),
-            ("https://plogin.m.jd.com/user/login?%s" % urllib.parse.urlencode(
-                {"ticket": ticket, "appid": QR_APPID, "returnurl": "https://www.jd.com/"}),
-             UA_M, "https://plogin.m.jd.com/login/login?appid=%s" % QR_APPID),
-        ]
-        diag = []
-        for url, ua, ref in attempts:
-            try:
-                self.s.headers.update({
-                    "User-Agent": ua, "Referer": ref,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                })
-                r = self.s.get(url, timeout=30, allow_redirects=True)
-                cookie = self._extract_pt()
-                diag.append("%s -> %s" % (urllib.parse.urlsplit(url).netloc,
-                                          "OK" if cookie else "no-pt"))
-                if cookie:
-                    self.cookie = cookie
-                    self.pt_pin = _pin_of(cookie)
-                    self.status = "success"
-                    ok, nick = verify_cookie(cookie)
-                    self.nickname = nick or ""
-                    return self._result()
-            except Exception as e:
-                diag.append("%s -> %s" % (urllib.parse.urlsplit(url).netloc,
-                                          type(e).__name__))
-        raise RuntimeError("登录成功但未从会话中解析到 pt_key/pt_pin [%s]" % "; ".join(diag))
+        # 京东扫码登录唯一正确的 ticket 兑换端点：
+        #   GET passport.jd.com/uc/qrCodeTicketValidation?t=<ticket>
+        # 成功（returnCode=0）后京东通过 Set-Cookie 下发 pt_key/pt_pin（社区脚本通用做法）。
+        # 旧实现里用的 passport.jd.com/uc/login、pt.m.jd.com/user/login、
+        # plogin.m.jd.com/user/login 都不是扫码 ticket 的兑换地址（后者实测 302 跳 error2.aspx），
+        # 导致永远拿不到 pt_key/pt_pin → 前端报「获取失败」。
+        url = "https://passport.jd.com/uc/qrCodeTicketValidation"
+        headers = {
+            "User-Agent": UA_PC,
+            "Referer": "https://passport.jd.com/uc/login?ltype=logout",
+            "Accept": "*/*",
+        }
+        r = self.s.get(url, params={"t": ticket}, headers=headers,
+                       timeout=30, allow_redirects=False)
+        txt = (r.text or "").strip()
+        try:
+            j = json.loads(txt)
+        except Exception:
+            j = {}
+        rc = j.get("returnCode") if isinstance(j, dict) else None
+        if rc != 0:
+            msg = (j.get("msg") or "") if isinstance(j, dict) else ""
+            raise RuntimeError(
+                "京东二维码校验未通过（returnCode=%s%s），请重新生成二维码并在手机京东 App 上确认"
+                % (rc, "，%s" % msg if msg else ""))
+        # 让登录态 Cookie 落到主域（pt_key/pt_pin 通过校验响应下发，必要时再访问主页兜底）
+        try:
+            self.s.get("https://www.jd.com/", timeout=15)
+        except Exception:
+            pass
+        cookie = self._extract_pt()
+        if not cookie:
+            names = sorted({c.name for c in self.s.cookies if "pt" in c.name.lower()})
+            raise RuntimeError(
+                "登录校验已通过（returnCode=0），但会话中未解析到 pt_key/pt_pin"
+                "（当前会话含 pt 类 cookie: %s）" % (",".join(names) or "无"))
+        self.cookie = cookie
+        self.pt_pin = _pin_of(cookie)
+        self.status = "success"
+        ok, nick = verify_cookie(cookie)
+        self.nickname = nick or ""
+        return self._result()
 
     def _extract_pt(self):
         try:
