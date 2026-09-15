@@ -1,14 +1,22 @@
-"""京东扫码登录引擎（纯 Python，零外部依赖）。
+"""京东扫码登录引擎（纯 Python）。
 
-替代 yyb-go 的最终产出（pt_key/pt_pin）：
-  1) GET  qr.m.jd.com/show            -> 二维码图片 + wlfstk_smdl token
-  2) 轮询 GET qr.m.jd.com/check       -> 201 未扫 / 202 已扫待确认 / 203 过期 / 200 成功(ticket)
-  3) GET  passport.jd.com/uc/qrCodeTicketValidation?t=<ticket>
-                                    -> returnCode=0 时经 Set-Cookie 下发 pt_key/pt_pin
+京东官方扫码登录，走移动端 plogin（appid=300）流程，三段式：
+  1) GET  plogin.m.jd.com/cgi-bin/mm/new_login_entrance  -> s_token（伴随 guid/lsid/lstoken cookie）
+  2) POST plogin.m.jd.com/cgi-bin/m/tmauthreflogurl      -> token + okl_token(Set-Cookie)
+     二维码 URL: https://plogin.m.jd.com/cgi-bin/m/tmauth?appid=300&client_type=m&token=<token>
+  3) POST plogin.m.jd.com/cgi-bin/m/tmauthchecktoken     -> errcode 判定：
+        0   = 登录成功（Set-Cookie 下发 pt_key/pt_pin）
+        21  = 二维码失效
+        176 = 尚未扫码 / 授权未确认
 
-接口形态与 yyb-go 对齐（create/poll/confirm 三段式），面板与独立脚本均可复用。
+说明：京东 PC 端 qr.m.jd.com（appid=133）那套旧流程即使 returnCode=0 也不再下发
+登录态 Cookie（实测 Set-Cookie 为空），因此改为移动端 tmauth 流程——pt_key/pt_pin 在
+tmauthchecktoken 返回 errcode=0 时经 Set-Cookie 下发。
+
+接口形态保持 create/poll/confirm 三段式，面板与独立脚本均可复用。
 """
 import base64
+import io
 import json
 import re
 import threading
@@ -18,25 +26,19 @@ import uuid
 
 import requests
 
-UA_PC = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
-UA_M = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+# 移动端 UA（京东 plogin 扫码流程要求，末尾 TM/{0} 填毫秒时间戳防缓存）
+UA = (
+    "Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_2 like Mac OS X; en-us) "
+    "AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8H7 "
+    "Safari/6533.18.5 UCBrowser/13.4.2.1122 TM/{0}"
 )
 
-QR_APPID = "133"
-
-# check 状态码 -> 统一状态
-CODE_MAP = {
-    200: "confirmed",   # 已确认，携带 ticket
-    201: "waiting",     # 未扫描
-    202: "scanned",     # 已扫描，手机待确认
-    203: "expired",     # 二维码过期
-    257: "error",       # 参数异常
-}
+LOGIN_APPID = "300"
+QR_URL_TMPL = "https://plogin.m.jd.com/cgi-bin/m/tmauth?appid=300&client_type=m&token={token}"
+RETURN_URL_TMPL = (
+    "https://wqlogin2.jd.com/passport/LoginRedirect?state={t}"
+    "&returnurl=//home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&/myJd/home.action"
+)
 
 SESSION_TTL = 300  # 扫码会话保留 5 分钟
 
@@ -47,71 +49,128 @@ class JdQrSession:
     def __init__(self):
         self.sid = uuid.uuid4().hex[:16]
         self.s = requests.Session()
-        self.s.headers.update({
-            "User-Agent": UA_PC,
-            "Referer": "https://passport.jd.com/new/login.aspx",
-        })
-        self.token = ""        # wlfstk_smdl
+        self.s.headers.update({"Accept": "application/json, text/plain, */*"})
+        self.s_token = ""      # 第一步拿到
+        self.token = ""        # 二维码订单 token（m_token...）
+        self.okl_token = ""    # 校验用
+        self.qr_url = ""       # 二维码内容（URL）
         self.status = "created"
         self.msg = ""
-        self.ticket = ""
         self.cookie = ""
         self.pt_pin = ""
         self.nickname = ""
         self.created = time.time()
 
+    # ---- 内部工具 ----
+    def _ua(self):
+        return UA.format(int(time.time() * 1000))
+
+    def _referer(self, t_ms=None):
+        t = t_ms or int(time.time() * 1000)
+        return (
+            "https://plogin.m.jd.com/login/login?appid=300&returnurl="
+            "https://wqlogin2.jd.com/passport/LoginRedirect?state=%d"
+            "&returnurl=//home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&/myJd/home.action"
+            "&source=wq_passport" % t
+        )
+
     # ---- 1. 生成二维码 ----
     def create_qr(self):
-        # 预热 passport，拿 guid/_t 等基础 cookie
-        try:
-            self.s.get("https://passport.jd.com/new/login.aspx", timeout=15)
-        except Exception:
-            pass
-        r = self.s.get(
-            "https://qr.m.jd.com/show",
-            params={"appid": QR_APPID, "size": 200, "t": int(time.time() * 1000)},
-            timeout=15,
+        # 1-1) 取 s_token
+        t = int(time.time())
+        ru = (
+            "https://wq.jd.com/passport/LoginRedirect?state=%d&returnurl="
+            "https://home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&/myJd/home.action"
+            "&source=wq_passport" % t
         )
-        r.raise_for_status()
-        if "image" not in (r.headers.get("Content-Type") or ""):
-            raise RuntimeError("京东二维码接口返回异常: %s" % r.headers.get("Content-Type"))
-        self.token = self.s.cookies.get("wlfstk_smdl") or ""
+        url1 = ("https://plogin.m.jd.com/cgi-bin/mm/new_login_entrance?lang=chs&appid=300&returnurl="
+                + urllib.parse.quote(ru, safe=""))
+        r1 = self.s.get(url1, headers={"User-Agent": self._ua(), "Referer": url1}, timeout=20)
+        r1.raise_for_status()
+        try:
+            self.s_token = (r1.json() or {}).get("s_token", "")
+        except Exception:
+            self.s_token = ""
+        if not self.s_token:
+            raise RuntimeError("京东未返回 s_token（body: %s）" % (r1.text or "")[:120])
+
+        # 1-2) 取二维码 token + okl_token
+        t2 = int(time.time() * 1000)
+        url2 = ("https://plogin.m.jd.com/cgi-bin/m/tmauthreflogurl?s_token=%s&v=%d&remember=true"
+                % (self.s_token, t2))
+        data2 = {"lang": "chs", "appid": LOGIN_APPID,
+                 "returnurl": RETURN_URL_TMPL.format(t=t2)}
+        h2 = {"User-Agent": self._ua(), "Referer": self._referer(t2),
+              "Content-Type": "application/x-www-form-urlencoded; Charset=UTF-8"}
+        r2 = self.s.post(url2, headers=h2, data=data2, timeout=20)
+        r2.raise_for_status()
+        try:
+            self.token = (r2.json() or {}).get("token", "")
+        except Exception:
+            self.token = ""
         if not self.token:
-            raise RuntimeError("未获取到二维码 token（wlfstk_smdl）")
+            raise RuntimeError("京东未返回登录 token（body: %s）" % (r2.text or "")[:120])
+        self.okl_token = (self.s.cookies.get_dict() or {}).get("okl_token", "")
+
+        # 1-3) 二维码内容（自行编码成图片）
+        self.qr_url = QR_URL_TMPL.format(token=self.token)
         self.status = "waiting"
-        return base64.b64encode(r.content).decode("ascii")
+        return _qr_png_base64(self.qr_url)
 
     # ---- 2. 轮询扫码状态 ----
     def poll(self):
-        if self.status in ("confirmed", "success"):
-            return self._state()
-        if self.status == "expired":
+        if self.status in ("success", "expired"):
             return self._state()
         if not self.token:
             raise RuntimeError("会话尚未生成二维码")
-        r = self.s.get(
-            "https://qr.m.jd.com/check",
-            params={
-                "callback": "jsonpCallback",
-                "appid": QR_APPID,
-                "token": self.token,
-                "_": int(time.time() * 1000),
-            },
-            timeout=15,
-        )
-        txt = (r.text or "").strip()
+        t = int(time.time() * 1000)
+        url = ("https://plogin.m.jd.com/cgi-bin/m/tmauthchecktoken?&token=%s&ou_state=0&okl_token=%s"
+               % (self.token, self.okl_token))
+        data = {"lang": "chs", "appid": LOGIN_APPID,
+                "returnurl": RETURN_URL_TMPL.format(t=t), "source": "wq_passport"}
+        h = {"User-Agent": self._ua(), "Referer": self._referer(t),
+             "Content-Type": "application/x-www-form-urlencoded; Charset=UTF-8"}
+        r = self.s.post(url, headers=h, data=data, timeout=20)
         try:
-            j = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+            j = r.json()
         except Exception:
-            raise RuntimeError("check 返回非 JSON: %s" % txt[:120])
-        code = j.get("code")
-        self.msg = str(j.get("msg") or "")
-        self.status = CODE_MAP.get(code, "unknown")
-        if code == 200:
-            self.ticket = str(j.get("ticket") or "")
-            if not self.ticket:
+            raise RuntimeError("tmauthchecktoken 返回非 JSON：%s" % (r.text or "")[:120])
+        code = j.get("errcode")
+        self.msg = str(j.get("message") or "")
+        if code == 0:
+            # 登录成功：pt_key/pt_pin 经 Set-Cookie 下发（直接从响应头解析，绕开 cookie jar 域判断）
+            cookie = _parse_pt_from_headers(r.headers.get("Set-Cookie") or "")
+            if not cookie:
+                cookie = self._extract_pt()
+            if not cookie:
+                try:
+                    r2 = self.s.get("https://home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=",
+                                    headers={"User-Agent": self._ua()}, timeout=15)
+                    cookie = _parse_pt_from_headers(r2.headers.get("Set-Cookie") or "")
+                except Exception:
+                    pass
+            if cookie:
+                for n, v in _split_pt(cookie).items():
+                    try:
+                        self.s.cookies.set(n, v, domain=".jd.com", path="/")
+                    except Exception:
+                        pass
+                self.cookie = cookie
+                self.pt_pin = _pin_of(cookie)
+                self.status = "success"
+                self.msg = "扫码登录成功"
+            else:
                 self.status = "error"
-                self.msg = "扫码成功但未返回 ticket"
+                self.msg = ("扫码已确认，但未从响应中解析到 pt_key/pt_pin"
+                            "（Set-Cookie 摘要: %s）"
+                            % (((r.headers.get("Set-Cookie") or "").replace("\r", "")
+                                .replace("\n", "")[:200]) or "空"))
+        elif code == 21:
+            self.status = "expired"
+        elif code == 176:
+            self.status = "waiting"   # 尚未扫码 / 授权未确认
+        else:
+            self.status = "waiting"
         return self._state()
 
     def _state(self):
@@ -119,68 +178,22 @@ class JdQrSession:
                 "expired": self.status in ("expired", "error"),
                 "ready": self.status == "success"}
 
-    # ---- 3. ticket 换 Cookie ----
+    # ---- 3. 确认并取回 Cookie ----
     def confirm(self):
         if self.status == "success" and self.cookie:
-            return self._result()
-        if self.status != "confirmed" or not self.ticket:
-            raise RuntimeError("用户尚未在手机上确认（当前状态: %s）" % self.status)
-        ticket = self.ticket
-        # 京东扫码登录唯一正确的 ticket 兑换端点：
-        #   GET passport.jd.com/uc/qrCodeTicketValidation?t=<ticket>
-        # 成功（returnCode=0）后京东通过 Set-Cookie 下发 pt_key/pt_pin（社区脚本通用做法）。
-        # 旧实现里用的 passport.jd.com/uc/login、pt.m.jd.com/user/login、
-        # plogin.m.jd.com/user/login 都不是扫码 ticket 的兑换地址（后者实测 302 跳 error2.aspx），
-        # 导致永远拿不到 pt_key/pt_pin → 前端报「获取失败」。
-        url = "https://passport.jd.com/uc/qrCodeTicketValidation"
-        headers = {
-            "User-Agent": UA_PC,
-            "Referer": "https://passport.jd.com/uc/login?ltype=logout",
-            "Accept": "*/*",
-        }
-        r = self.s.get(url, params={"t": ticket}, headers=headers,
-                       timeout=30, allow_redirects=False)
-        txt = (r.text or "").strip()
-        try:
-            j = json.loads(txt)
-        except Exception:
-            j = {}
-        rc = j.get("returnCode") if isinstance(j, dict) else None
-        if rc != 0:
-            msg = (j.get("msg") or "") if isinstance(j, dict) else ""
-            raise RuntimeError(
-                "京东二维码校验未通过（returnCode=%s%s），请重新生成二维码并在手机京东 App 上确认"
-                % (rc, "，%s" % msg if msg else ""))
-        # returnCode=0 表示校验通过。京东会在校验响应的 Set-Cookie 里下发 pt_key/pt_pin。
-        # 直接用正则从 Set-Cookie 头解析，绕开 cookie jar 的 domain/属性判断（最可靠）。
-        cookie = _parse_pt_from_headers(r.headers.get("Set-Cookie") or "")
-        # 兜底：部分情况下主域 pt_key 需再访问一次主页才落地
-        if not cookie:
-            try:
-                r2 = self.s.get("https://www.jd.com/", timeout=15, allow_redirects=True)
-                cookie = _parse_pt_from_headers(r2.headers.get("Set-Cookie") or "")
-            except Exception:
-                pass
-        if not cookie:
-            cookie = self._extract_pt()
-        if not cookie:
-            names = sorted({c.name for c in self.s.cookies if "pt" in c.name.lower()})
-            sc = (r.headers.get("Set-Cookie") or "").replace("\r", "").replace("\n", "")[:400]
-            raise RuntimeError(
-                "登录校验已通过（returnCode=0），但未能从响应中解析到 pt_key/pt_pin。"
-                "（会话 pt 类 cookie: %s；校验响应 Set-Cookie 摘要: %s）"
-                % (",".join(names) or "无", sc or "空"))
-        # 写回 session，便于后续 verify_cookie / 续期使用
-        for name, value in _split_pt(cookie).items():
-            try:
-                self.s.cookies.set(name, value, domain=".jd.com", path="/")
-            except Exception:
-                pass
-        self.cookie = cookie
-        self.pt_pin = _pin_of(cookie)
-        self.status = "success"
-        ok, nick = verify_cookie(cookie)
-        self.nickname = nick or ""
+            return self._finish()
+        # 用户点了确认但前端可能尚未轮询到：再查一次
+        self.poll()
+        if self.status == "success" and self.cookie:
+            return self._finish()
+        if self.status == "error":
+            raise RuntimeError(self.msg or "扫码已确认，但未取到 Cookie")
+        raise RuntimeError("用户尚未在手机上确认登录（当前状态: %s）" % self.status)
+
+    def _finish(self):
+        self.pt_pin = self.pt_pin or _pin_of(self.cookie)
+        ok, nick = verify_cookie(self.cookie)
+        self.nickname = nick or self.pt_pin
         return self._result()
 
     def _extract_pt(self):
@@ -197,11 +210,10 @@ class JdQrSession:
 
     def _result(self):
         return {"cookie": self.cookie, "pt_pin": self.pt_pin,
-                "nickname": self.nickname, "status": self.status}
+                "nickname": self.nickname, "status": self.status, "qr_url": self.qr_url}
 
 
 def _pin_of(cookie):
-    import re
     m = re.search(r"pt_pin=([^;,\s]+)", cookie or "")
     if not m:
         return ""
@@ -209,12 +221,7 @@ def _pin_of(cookie):
 
 
 def _parse_pt_from_headers(set_cookie_str):
-    """从 Set-Cookie 响应头字符串里直接提取 pt_key/pt_pin（绕开 cookie jar 的域判断）。
-
-    京东在 qrCodeTicketValidation returnCode=0 时通过 Set-Cookie 下发这两个 cookie，
-    但 requests 的 cookie jar 受 domain / SameSite / Partitioned 等属性影响，可能漏存，
-    因此这里直接对原始头做正则解析，最稳妥。
-    """
+    """从 Set-Cookie 响应头字符串里直接提取 pt_key/pt_pin（绕开 cookie jar 的域判断）。"""
     if not set_cookie_str:
         return ""
     text = set_cookie_str.replace("\r", "").replace("\n", "")
@@ -228,13 +235,24 @@ def _parse_pt_from_headers(set_cookie_str):
 def _split_pt(cookie):
     """'pt_key=...;pt_pin=...;' -> {name: value}"""
     out = {}
-    for part in cookie.split(";"):
+    for part in (cookie or "").split(";"):
         part = part.strip()
         if "=" in part:
             n, v = part.split("=", 1)
             if n.strip() in ("pt_key", "pt_pin"):
                 out[n.strip()] = v
     return out
+
+
+def _qr_png_base64(text):
+    """把文本编码成 PNG 二维码（base64）。优先 segno（纯 Python，零依赖）。"""
+    try:
+        import segno
+    except ImportError:
+        raise RuntimeError("缺少二维码生成库，请执行：pip install segno")
+    buf = io.BytesIO()
+    segno.make(text, error="m").save(buf, kind="png", scale=6, border=2)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 # ============ 会话注册表（线程安全 + 自动清理） ============
@@ -295,9 +313,11 @@ def verify_cookie(cookie):
         ("https://wq.jd.com/user/info/QueryJDUserInfo",
          {"Referer": "https://wqs.jd.com/my/okuserinfo.shtml"}),
     ]
+    ua_m = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
     for url, extra in endpoints:
         try:
-            h = {"User-Agent": UA_M, "Cookie": cookie}
+            h = {"User-Agent": ua_m, "Cookie": cookie}
             h.update(extra)
             r = requests.get(url, headers=h, timeout=12)
             j = r.json()
