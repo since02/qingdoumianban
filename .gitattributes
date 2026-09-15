@@ -1,0 +1,12 @@
+# 强制 Windows 批处理用 CRLF，避免在 Linux 环境编辑后带回 LF 导致 cmd.exe 解析错乱
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+# Shell 脚本保持 LF
+*.sh text eol=lf
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
+*.zip binary

@@ -23,6 +23,31 @@ MARK = "app.py"
 SELF = "panel_ctl.py"
 
 
+def _init_console():
+    """让中文在 cmd 窗口正常显示。
+
+    Python 的 stdout 默认编码可能与控制台实际代码页不一致（例如 GBK 控制台下按 UTF-8
+    输出），导致双击 start.bat 时窗口里中文变成乱码。这里按控制台真实代码页重设编码。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        cp = ctypes.windll.kernel32.GetConsoleOutputCP() or 936
+        for s in (sys.stdout, sys.stderr):
+            if s is None:
+                continue
+            try:
+                s.reconfigure(encoding=f"cp{cp}", errors="replace")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_init_console()
+
+
 def _port():
     """从数据库读取面板端口，失败则回落 5700。"""
     try:

@@ -1,28 +1,45 @@
 @echo off
-chcp 65001 >nul
-cd /d %~dp0
+REM ×¢Òâ£º±¾ÎÄ¼þ±ØÐë±£´æÎª ANSI/GBK ±àÂë + CRLF »»ÐÐ£¨cmd.exe µÄÓ²ÒªÇó£©¡£
+REM ²»Òª¸Ä³É UTF-8£¬Ò²²»Òª¼Ó chcp 65001£º·ñÔòº¬ÖÐÎÄµÄÐÐ»á±» cmd °´×Ö½ÚÆ«ÒÆÇÐËé£¬
+REM ³öÏÖÒ»¶Ñ "'xxx' ²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî"£¬ÉõÖÁ°ÑÂã python ÅÜ³É½»»¥Ê½´°¿Ú¡£
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
 
-REM å…¨å±€ Pythonï¼ˆä»…ç”¨äºŽé¦–æ¬¡åˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒï¼‰
-set "GP=python"
-where python >nul 2>&1 || set "GP=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+set "PY=.venv\Scripts\python.exe"
 
-REM é¦–æ¬¡è¿è¡Œï¼šåˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒå¹¶å®‰è£…ä¾èµ–
-if not exist ".venv\Scripts\python.exe" (
-  echo é¦–æ¬¡è¿è¡Œï¼šåˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒå¹¶å®‰è£…ä¾èµ–...
-  "%GP%" -m venv .venv
-  if exist ".venv\Scripts\pip.exe" call .venv\Scripts\pip install -r requirements.txt
+REM ========== Ê×´ÎÔËÐÐ£º´´½¨ÐéÄâ»·¾³²¢°²×°ÒÀÀµ ==========
+if not exist "%PY%" (
+  echo [Ê×´ÎÔËÐÐ] ÕýÔÚ´´½¨ÐéÄâ»·¾³²¢°²×°ÒÀÀµ£¬ÇëÉÔºò...
+  set "GP="
+  where python >nul 2>&1 && set "GP=python"
+  if not defined GP (
+    where py >nul 2>&1 && set "GP=py"
+  )
+  if not defined GP set "GP=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+  if not exist "!GP!" if /i not "!GP!"=="python" if /i not "!GP!"=="py" (
+    echo [´íÎó] ÕÒ²»µ½¿ÉÓÃµÄ Python£¬ÇëÏÈ°²×° Python 3.9+ ²¢¼ÓÈë PATH¡£
+    pause
+    exit /b 1
+  )
+  !GP! -m venv .venv
+  if exist "%PY%" (
+    "%PY%" -m pip install -r requirements.txt
+  )
 )
 
-REM é€‰æ‹©è§£é‡Šå™¨ï¼šä¼˜å…ˆ venv çš„ pythonï¼ˆç”¨æ™®é€š python.exeï¼›ä¸ç”¨ pythonwï¼Œé¿å…æ— æŽ§åˆ¶å°æ—¶ print å¯¼è‡´è¿›ç¨‹é™é»˜é€€å‡ºï¼‰
-if exist ".venv\Scripts\python.exe" (
-  set "PY=.venv\Scripts\python.exe"
-) else (
-  set "PY=python"
+if not exist "%PY%" (
+  echo.
+  echo [´íÎó] ÐéÄâ»·¾³´´½¨Ê§°Ü£¨Î´ÕÒµ½ .venv\Scripts\python.exe£©¡£
+  echo        ÇëÈ·ÈÏÒÑ°²×° Python 3.9+£¬²¢ÔÚÃüÁîÐÐÀïÄÜÖ´ÐÐ python -V¡£
+  echo.
+  pause
+  exit /b 1
 )
 
-echo æ­£åœ¨å¯åŠ¨é’è±†é¢æ¿ï¼ˆåŽå°è¿è¡Œï¼Œæ—¥å¿—: data\panel.logï¼‰...
+echo ÕýÔÚÆô¶¯Çà¶¹Ãæ°å£¨ºóÌ¨ÔËÐÐ£¬ÈÕÖ¾: data\panel.log£©...
 "%PY%" panel_ctl.py start
 
-REM çŸ­æš‚æ˜¾ç¤ºç»“æžœåŽè‡ªåŠ¨å…³é—­æœ¬çª—å£
-timeout /t 2 >nul
-exit
+echo.
+echo Ãæ°åÒÑÔÚºóÌ¨ÔËÐÐ£¬±¾´°¿Ú¿ÉÒÔÖ±½Ó¹Ø±Õ¡£
+pause
+exit /b 0

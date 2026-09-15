@@ -47,7 +47,26 @@ class _Tee:
             raise OSError("no fileno")
 
 
+def _init_console():
+    """按控制台实际代码页设置 stdout/stderr 编码，避免 cmd 窗口里中文乱码。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        cp = ctypes.windll.kernel32.GetConsoleOutputCP() or 936
+        for s in (sys.stdout, sys.stderr):
+            if s is None:
+                continue
+            try:
+                s.reconfigure(encoding=f"cp{cp}", errors="replace")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _setup_log():
+    _init_console()
     try:
         _log_dir = os.path.join(BASE_DIR, "data")
         os.makedirs(_log_dir, exist_ok=True)
