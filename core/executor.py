@@ -12,6 +12,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SCRIPTS_DIR = os.path.join(DATA_DIR, "scripts")
 LOGS_DIR = os.path.join(DATA_DIR, "logs")
+BIN_DIR = os.path.join(DATA_DIR, "bin")                 # 面板自带可执行垫片（pnpm 等）
+NPM_GLOBAL_DIR = os.path.join(DATA_DIR, "npm-global")   # 项目内绿色全局依赖目录
+NPM_REGISTRY = "https://registry.npmmirror.com"         # 默认国内镜像，避免直连 npmjs 超时
 
 # 并发队列：工作线程池从队列取任务；超额任务进入队列等待，不再被丢弃。
 _queue = queue.Queue()
@@ -91,13 +94,58 @@ def resolve_command(command):
     return cmd
 
 
+def get_global_node_modules():
+    """项目内绿色全局依赖目录（随整个文件夹搬走，不污染系统环境）。"""
+    if os.name == "nt":
+        return os.path.join(NPM_GLOBAL_DIR, "node_modules")
+    return os.path.join(NPM_GLOBAL_DIR, "lib", "node_modules")
+
+
+def inject_node_env(env):
+    """注入面板自带的 Node 运行环境（pnpm 垫片 / 全局依赖 / 国内镜像）。
+
+    为什么需要：
+    - PATH 前置 data/bin：很多青龙脚本（jd_indeps.js 等）用 `pnpm add -g` 装依赖，
+      而目标机器往往只装了 node/npm 没有 pnpm → 全部报「找不到 pnpm」而失败。
+      面板在此内置一个 pnpm 垫片（把 pnpm 命令翻译为 npm），随项目绿色携带。
+    - NODE_PATH 指向 data/npm-global/node_modules：把依赖装进项目内目录后，
+      Node 默认不会搜索全局目录，必须靠 NODE_PATH 才能 require 到。
+    - registry 默认走 npmmirror：国内直连 npmjs.org 常超时，导致「安装失败」。
+    """
+    try:
+        os.makedirs(BIN_DIR, exist_ok=True)
+        os.makedirs(NPM_GLOBAL_DIR, exist_ok=True)
+    except Exception:
+        pass
+    sep = os.pathsep
+    front = []
+    if os.path.isdir(BIN_DIR):
+        front.append(BIN_DIR)
+    node_exe = get_node_path()
+    if node_exe and node_exe.lower() not in ("node", "nodejs", "node.exe"):
+        nd = os.path.dirname(node_exe)
+        if nd and os.path.isdir(nd):
+            front.append(nd)   # 保证自定义 node 路径下的 node/npm 也能被解析
+    old_path = env.get("PATH", "")
+    env["PATH"] = sep.join(front + ([old_path] if old_path else []))
+    gm = get_global_node_modules()
+    old_np = env.get("NODE_PATH", "")
+    env["NODE_PATH"] = sep.join([gm] + ([old_np] if old_np else []))
+    env.setdefault("npm_config_prefix", NPM_GLOBAL_DIR)
+    env.setdefault("npm_config_registry", NPM_REGISTRY)
+    env.setdefault("QD_NPM_REGISTRY", NPM_REGISTRY)
+    env["npm_config_fund"] = "false"
+    env["npm_config_audit"] = "false"
+    return env
+
+
 def build_env():
-    """合并系统环境与已启用的环境变量。"""
+    """合并系统环境与已启用的环境变量，并注入面板自带的 Node 运行环境。"""
     env = os.environ.copy()
     rows = db.query("SELECT name,value FROM environments WHERE status=1")
     for r in rows:
         env[str(r["name"])] = str(r["value"] or "")
-    return env
+    return inject_node_env(env)
 
 
 def make_log_path(prefix):

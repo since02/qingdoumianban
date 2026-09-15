@@ -30,8 +30,11 @@ def _install_worker(dep_id, dtype, command, log_path):
         import subprocess
         try:
             # 以参数列表方式执行，shell=False，从根本上消除命令注入
+            # npm 类型走面板绿色全局目录（data/npm-global）+ 国内镜像，与脚本内
+            # 依赖安装保持一致，避免装到系统全局或用 npmjs 超时。
+            env = _exec.inject_node_env(os.environ.copy())
             proc = subprocess.Popen(command, shell=False, stdout=lf, stderr=subprocess.STDOUT,
-                                    cwd=BASE_DIR)
+                                    cwd=BASE_DIR, env=env)
             proc.wait(timeout=600)
             rc = proc.returncode
         except subprocess.TimeoutExpired:

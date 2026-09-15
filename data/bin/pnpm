@@ -1,0 +1,4 @@
+#!/bin/sh
+# 青豆面板 · pnpm 绿色垫片（Linux/macOS）
+DIR=$(cd "$(dirname "$0")" && pwd)
+exec node "$DIR/pnpm.js" "$@"

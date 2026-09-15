@@ -4,6 +4,8 @@
 *.ps1 text eol=crlf
 # Shell 脚本保持 LF
 *.sh text eol=lf
+# 无扩展名的 shell 垫片（data/bin/pnpm）
+data/bin/pnpm text eol=lf
 # 二进制
 *.png binary
 *.jpg binary

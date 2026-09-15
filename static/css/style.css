@@ -159,7 +159,6 @@ textarea { resize: vertical; min-height: 80px; font-family: "SFMono-Regular", Co
 .pill { font-size: 11px; padding: 2px 8px; border-radius: 20px; background: var(--bg-hover); color: var(--text-dim); }
 .flex { display: flex; align-items: center; gap: 8px; }
 .spacer { flex: 1; }
-.logview { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 60vh; overflow-y: auto; }
 .toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg-card); border: 1px solid var(--border); padding: 12px 18px; border-radius: 10px; box-shadow: var(--shadow); z-index: 200; transform: translateY(20px); opacity: 0; transition: .25s; }
 .toast.show { transform: none; opacity: 1; }
 .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
