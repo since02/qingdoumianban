@@ -84,7 +84,12 @@ def _stop_by_port(port):
     """兜底：面板进程若脱离了进程枚举视图（如 DETACHED 启动），按端口占用者 PID 结束。"""
     killed = False
     try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=20).stdout
+        # 注意：Windows netstat 输出可能含非 UTF-8 字节（中文 locale），必须 errors="replace"，
+        # 否则 text=True 用默认 utf-8 解码会抛 UnicodeDecodeError，stdout 变成 None 导致后续崩溃。
+        out = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
+        ).stdout or ""
         pids = []
         for line in out.splitlines():
             upper = line.upper()
@@ -106,34 +111,40 @@ def _stop_by_port(port):
 
 def stop():
     port = _port()
-    procs = _panel_procs()
-    if not procs and not _port_listening(port):
-        print("没有正在运行的面板进程")
-        return 0
-
-    if procs:
-        print(f"发现面板进程 {len(procs)} 个，正在停止…")
+    # 多次重试，确保彻底停止所有面板进程并释放端口。
+    # 旧进程常以 DETACHED 方式运行，psutil 有时读不到其命令行而漏杀，
+    # 因此每次循环都按端口强制兜底结束，直到端口不再被监听为止。
+    # 同时优先读取 panel.pid 精准结束（避免误杀其它 python 进程）。
+    pidfile = os.path.join(LOG_DIR, "panel.pid")
+    for _ in range(15):
+        # 优先结束 pidfile 记录的进程
+        try:
+            if os.path.exists(pidfile):
+                with open(pidfile, encoding="utf-8", errors="replace") as f:
+                    pid = int((f.read() or "").strip() or 0)
+                if pid > 0:
+                    try:
+                        import psutil
+                        psutil.Process(pid).kill()
+                        print(f"  已按 pidfile 结束 PID {pid}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        procs = _panel_procs()
+        listening = _port_listening(port)
+        if not procs and not listening:
+            break
         for p in procs:
             try:
-                p.terminate()
-                print(f"  已请求停止 PID {p.pid} ({p.info.get('name')})")
-            except Exception as e:
-                print(f"  停止 PID {p.pid} 失败: {e}")
-        time.sleep(1.5)
-        for p in _panel_procs():
-            try:
                 p.kill()
-                print(f"  已强制结束 PID {p.pid}")
-            except Exception:
-                pass
+                print(f"  已结束 PID {p.pid} ({p.info.get('name')})")
+            except Exception as e:
+                print(f"  结束 PID {p.pid} 失败: {e}")
+        # 兜底：无论 psutil 是否识别到，只要端口还被占用就强制按端口结束
+        if _port_listening(port):
+            _stop_by_port(port)
         time.sleep(0.5)
-
-    # 兜底：psutil 可能枚举不到已脱离的进程，改按端口处理
-    if _port_listening(port):
-        print(f"端口 {port} 仍在监听，按端口占用者结束…")
-        _stop_by_port(port)
-        time.sleep(1)
-
     if _port_listening(port):
         print("仍有残留进程占用端口，请手动结束")
         return 1
@@ -143,9 +154,28 @@ def stop():
 
 def start():
     os.makedirs(LOG_DIR, exist_ok=True)
+    # 幂等：若面板已经在运行且健康检查通过，直接返回，避免重复拉起导致进程堆积
+    port_now = _port()
+    if _port_listening(port_now):
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"http://127.0.0.1:{port_now}/healthz", timeout=2) as r:
+                if r.status == 200:
+                    msg = f"面板已在运行: http://127.0.0.1:{port_now}"
+                    print(msg)
+                    with open(LOG_FILE, "a", encoding="utf-8", errors="replace") as f:
+                        f.write(f"[启动检测] {msg}\n")
+                    return 0
+        except Exception:
+            pass
     # 先停旧的，避免端口冲突
     stop()
-    time.sleep(1)
+    # 等待端口彻底释放，避免旧进程的 TIME_WAIT 导致新进程绑定失败
+    port_pre = _port()
+    for _ in range(20):
+        if not _port_listening(port_pre):
+            break
+        time.sleep(0.5)
 
     log = open(LOG_FILE, "a", encoding="utf-8", errors="replace")
     log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动面板 =====\n")

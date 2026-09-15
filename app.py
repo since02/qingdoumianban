@@ -66,6 +66,35 @@ def _setup_log():
 
 _setup_log()
 
+# 单实例守卫：若端口已被同机其他面板实例监听，则当前进程立即退出，
+# 避免重复进程/僵尸堆积（排查中发现面板启动期可能被间接拉起一个"影子"子进程，
+# 但只要保证"只有一个实例真正监听端口、其余自行退出"即可稳定可起可停）。
+def _single_instance_guard():
+    import socket
+    try:
+        port = int(config.get_setting("port", "5700") or 5700)
+    except Exception:
+        port = 5700
+    s = socket.socket()
+    s.settimeout(1)
+    try:
+        taken = s.connect_ex(("127.0.0.1", port)) == 0
+    except Exception:
+        taken = False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    if taken:
+        try:
+            with open(os.path.join(BASE_DIR, "data", "panel.log"), "a", encoding="utf-8", errors="replace") as lf:
+                lf.write(f"[单实例] 端口 {port} 已被占用，pid={os.getpid()} 退出，避免重复实例\n")
+        except Exception:
+            pass
+        os._exit(0)
+
+
 from flask import Flask, send_from_directory
 from core import db, config
 from core import scheduler as sched_mod
@@ -129,10 +158,10 @@ def bootstrap():
     sched_mod.reload_all()
 
 
-def _serve_with_retry(app, port, max_retries=30, retry_interval=1.0):
-    """启动 HTTP 服务；若端口暂被占用（如重启交接期、或他进程占用）则重试。
-    监听地址取自设置 host（默认 0.0.0.0，可改 127.0.0.1 仅本机）。
-    端口持续不可用会打印明确错误并退出，便于排查。"""
+def _serve_with_retry(app, port, max_retries=10, retry_interval=1.0):
+    """启动 HTTP 服务；若端口暂被占用（如重启交接期、或已有实例在运行）则短暂重试，
+    仍不可用即视为"已有实例在跑"，当前进程优雅退出，避免重复进程/僵尸堆积。
+    监听地址取自设置 host（默认 0.0.0.0，可改 127.0.0.1 仅本机）。"""
     host = config.get_setting("host", "0.0.0.0") or "0.0.0.0"
     last_err = None
     for attempt in range(max_retries):
@@ -145,16 +174,21 @@ def _serve_with_retry(app, port, max_retries=30, retry_interval=1.0):
             last_err = e
             print(f"[青豆面板] 端口 {port} 暂不可用: {e}（{attempt+1}/{max_retries}），{retry_interval}s 后重试…")
             time.sleep(retry_interval)
-    # 重试耗尽，明确失败原因
-    print(f"[青豆面板] 端口 {port} 持续不可用，面板启动失败。请检查："
-          f"1) 是否有其他程序占用该端口（如另一个面板实例）；"
-          f"2) 系统设置里的端口/host 是否正确。错误详情: {last_err}")
-    raise last_err
+    # 端口持续被占用：说明已有面板实例在运行，当前进程退出（不再抛异常/堆积僵尸）
+    print(f"[青豆面板] 端口 {port} 持续被占用，已有面板实例在运行，当前进程退出。")
+    os._exit(0)
 
 
 if __name__ == "__main__":
+    _single_instance_guard()
     _register_routes()
     bootstrap()
     port = int(config.get_setting("port", "5700") or 5700)
+    # 登记本进程 PID，供 panel_ctl stop 精准结束（避免误杀其它 python）
+    try:
+        with open(os.path.join(BASE_DIR, "data", "panel.pid"), "w", encoding="utf-8") as _pf:
+            _pf.write(str(os.getpid()))
+    except Exception:
+        pass
     print(f"青豆面板已启动: http://127.0.0.1:{port}  (默认账号 admin / adminadmin)")
     _serve_with_retry(app, port)
